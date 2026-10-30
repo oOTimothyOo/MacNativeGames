@@ -1,5 +1,7 @@
 # MacNativeGames
 
+**This fork:** [Native Play](tools/native-play/README.md) is a Cocoa/AppKit library for locally built native ports, starting with Jamboree. The [Jamboree improvements](games/jamboree/docs/macos-improvements.md) include rendering fixes, movie completion, Bluetooth controller routing and an English controller setup. Game content and keys are never distributed here. The original project documentation follows.
+
 <p align="center"><b>A technical exploration: can a Nintendo Switch game's NVN graphics be ported to Metal?</b><br>
 Tested with your own copies of Tears of the Kingdom and Breath of the Wild on Mac, iPhone and iPad. Not an emulator: the game's own ARM64 code runs directly on Apple chips.</p>
 

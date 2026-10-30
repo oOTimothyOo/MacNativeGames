@@ -1,0 +1,26 @@
+name: Native Play and Jamboree
+
+on:
+  push:
+    paths: ['tools/native-play/**', 'games/jamboree/**', '.github/workflows/native-play.yml']
+  pull_request:
+    paths: ['tools/native-play/**', 'games/jamboree/**', '.github/workflows/native-play.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cocoa:
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7, same pin as source CI
+        with:
+          persist-credentials: false
+      - name: Build the content-free native launcher
+        run: python3 tools/native-play/build.py --output "$RUNNER_TEMP/Native Play.app" --work-dir "$RUNNER_TEMP/native-play-icon"
+      - name: Check recovery, policy and native controls with synthetic state
+        run: python3 tools/native-play/test.py --work-dir "$RUNNER_TEMP/native-play-tests" --app "$RUNNER_TEMP/Native Play.app"
+      - name: Check Jamboree packaging and shader-source regressions
+        run: python3 -m unittest discover -s games/jamboree/tests -v
