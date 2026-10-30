@@ -16,9 +16,13 @@
 #include "front.h"
 #include "hle.h"
 #include "pad_slots.h"
+#include "front_hid.h"
 #include "haptics_apple.h"
+#include "hle_haptics.h"
 #import "front_settings.h"
+#import "front_controllers.h"
 #include "mac_display_settings.h"
+#include "controller_settings.h"
 #include <signal.h>
 #include <math.h>
 
@@ -125,6 +129,33 @@ static void settings_changed(DmMacSetting setting, NSInteger value);
 static void settings_refresh(void);
 static NSString *g_pad_settings_path;
 static NSMenuItem *g_face_items[3], *g_swap_item, *g_fullscreen_item, *g_hints_item, *g_output_items[5];
+static DmControllersPanel *g_controllers_panel;
+static int g_controller_testing, g_player_layout[DM_PLAYERS], g_player_swap[DM_PLAYERS], g_player_swap_xy[DM_PLAYERS];
+@interface DmPadDevice : NSObject
+@property const void *key;
+@property DmControllerInfo *info;
+@property int armed;
+@end
+@implementation DmPadDevice @end
+static NSMutableDictionary<NSValue *, DmPadDevice *> *g_devices;
+static NSUInteger g_device_serial;
+static DmPadDevice *pad_device(const void *key) { return g_devices[[NSValue valueWithPointer:key]]; }
+static void pad_device_add(const void *key, const char *name) {
+    if (!g_devices) g_devices=[NSMutableDictionary new];
+    if (pad_device(key)) return;
+    DmPadDevice *d=[DmPadDevice new]; d.key=key;d.armed=1;d.info=[DmControllerInfo new];
+    d.info.token=++g_device_serial;d.info.name=@(name ? name : "Controller");
+    g_devices[[NSValue valueWithPointer:key]]=d;
+}
+static int player_layout(int p) { return p>=0 && p<DM_PLAYERS && g_player_layout[p]>=0 ? g_player_layout[p] : g_face_layout; }
+static int player_swap(int p) { return p>=0 && p<DM_PLAYERS && g_player_swap[p]>=0 ? g_player_swap[p] : g_swap_ab; }
+static void pad_publish(const void *key, int p, uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
+    DmPadDevice *d=pad_device(key); if (!d || p<0 || p>=DM_PLAYERS) return;
+    buttons=pad_swap_xy(buttons,g_player_swap_xy[p]);
+    d.info.buttons=buttons;d.info.lx=lx;d.info.ly=ly;d.info.rx=rx;d.info.ry=ry;
+    int armed=d.armed;int allowed=pad_input_allow(&armed,g_controller_testing,buttons,lx,ly,rx,ry);d.armed=armed;
+    if (allowed) dm_pad_set_player(p,buttons,lx,ly,rx,ry);else dm_pad_clear_player(p);
+}
 
 static NSString *pad_settings_path(void) {
     const char *save = getenv("DM_SAVE");
@@ -135,12 +166,13 @@ static NSString *pad_settings_path(void) {
 static void pad_settings_save(void) {
     if (!g_pad_settings_path) return;
     static const char *layout[] = {"auto", "position", "label"};
-    NSString *text = [NSString stringWithFormat:@"layout=%s\nswap_ab=%d\nfullscreen=%d\noutput=%d\nhints=%d\n",
+    NSMutableString *text = [NSMutableString stringWithFormat:@"layout=%s\nswap_ab=%d\nfullscreen=%d\noutput=%d\nhints=%d\n",
                                                 layout[g_face_layout], !!g_swap_ab, !!g_start_fullscreen, g_output_preset, !!g_show_hints];
-    NSError *error = nil;
-    if (![text writeToFile:g_pad_settings_path atomically:YES encoding:NSUTF8StringEncoding error:&error])
+    for (int p=0;p<DM_PLAYERS;p++) [text appendFormat:@"player_%d_layout=%d\nplayer_%d_swap_ab=%d\nplayer_%d_swap_xy=%d\n",p+1,g_player_layout[p],p+1,g_player_swap[p],p+1,g_player_swap_xy[p]];
+    NSData *encoded=[text dataUsingEncoding:NSUTF8StringEncoding];
+    if (!dm_controller_settings_write(g_pad_settings_path.fileSystemRepresentation,encoded.bytes,encoded.length))
         LOG("front end: could not save controller settings to %s: %s", g_pad_settings_path.fileSystemRepresentation,
-            error.localizedDescription.UTF8String ?: "unknown error");
+            strerror(errno));
 }
 
 static void pad_settings_load(void) {
@@ -148,6 +180,7 @@ static void pad_settings_load(void) {
     g_face_layout = DM_FACE_AUTO;
     g_swap_ab = 0;
     g_start_fullscreen = 0; g_output_preset = 0; g_show_hints = 1;
+    for (int p=0;p<DM_PLAYERS;p++) {g_player_layout[p]=g_player_swap[p]=-1;g_player_swap_xy[p]=0;}
     const char *e;
     NSString *text = g_pad_settings_path ? [NSString stringWithContentsOfFile:g_pad_settings_path encoding:NSUTF8StringEncoding error:nil] : nil;
     for (NSString *raw in [text componentsSeparatedByString:@"\n"]) {
@@ -163,6 +196,15 @@ static void pad_settings_load(void) {
         else if ([key isEqualToString:@"fullscreen"]) g_start_fullscreen = value.intValue != 0;
         else if ([key isEqualToString:@"output"]) { NSInteger n = value.integerValue; if (n >= 0 && n < 5) g_output_preset = (int)n; }
         else if ([key isEqualToString:@"hints"]) g_show_hints = value.intValue != 0;
+        else {
+            NSInteger n; NSScanner *scanner=[NSScanner scannerWithString:value];
+            if (![scanner scanInteger:&n] || !scanner.isAtEnd) continue;
+            for (int p=0;p<DM_PLAYERS;p++) {
+                if ([key isEqualToString:[NSString stringWithFormat:@"player_%d_layout",p+1]] && n>=-1 && n<=2) g_player_layout[p]=(int)n;
+                if ([key isEqualToString:[NSString stringWithFormat:@"player_%d_swap_ab",p+1]] && n>=-1 && n<=1) g_player_swap[p]=(int)n;
+                if ([key isEqualToString:[NSString stringWithFormat:@"player_%d_swap_xy",p+1]] && n>=0 && n<=1) g_player_swap_xy[p]=(int)n;
+            }
+        }
     }
     e = getenv("DM_PAD_LAYOUT");
     if (e && !strcmp(e, "auto")) g_face_layout = DM_FACE_AUTO;
@@ -185,20 +227,20 @@ static int pad_names_nintendo(NSString *text) {
     return 0;
 }
 
-static int pad_face_swap_abxy(GCController *controller) {
+static int pad_face_swap_abxy(GCController *controller, int player) {
     int nintendo = pad_names_nintendo(controller.vendorName) || pad_names_nintendo(controller.productCategory);
-    if (g_face_layout == DM_FACE_LABEL) return 1;
-    if (g_face_layout == DM_FACE_POSITION) return 0;   // GameController's native face-button positions are the Xbox / PlayStation layout
+    if (player_layout(player) == DM_FACE_LABEL) return 1;
+    if (player_layout(player) == DM_FACE_POSITION) return 0;   // GameController's native face-button positions are the Xbox / PlayStation layout
     return nintendo;
 }
 
-static uint64_t pad_face_buttons(GCExtendedGamepad *g, int swap_abxy) {
+static uint64_t pad_face_buttons(GCExtendedGamepad *g, int swap_abxy, int swap_ab) {
     uint64_t m = swap_abxy
         ? (g.buttonA.isPressed ? DM_BTN_B : 0) | (g.buttonB.isPressed ? DM_BTN_A : 0) |
           (g.buttonX.isPressed ? DM_BTN_Y : 0) | (g.buttonY.isPressed ? DM_BTN_X : 0)  // Nintendo printed labels (A right, B bottom, X top, Y left)
         : (g.buttonA.isPressed ? DM_BTN_A : 0) | (g.buttonB.isPressed ? DM_BTN_B : 0) |
           (g.buttonX.isPressed ? DM_BTN_X : 0) | (g.buttonY.isPressed ? DM_BTN_Y : 0); // Xbox / PlayStation printed positions
-    if (g_swap_ab) {
+    if (swap_ab) {
         uint64_t a = m & DM_BTN_A, b = m & DM_BTN_B;
         m &= ~(DM_BTN_A | DM_BTN_B);
         m |= (a ? DM_BTN_B : 0) | (b ? DM_BTN_A : 0);
@@ -210,6 +252,7 @@ static void pad_read(GCExtendedGamepad *g);
 static void pad_apply_settings(void) {
     for (GCController *controller in GCController.controllers)
         if (controller.extendedGamepad) pad_read(controller.extendedGamepad);
+    front_hid_refresh();
     for (int i = 0; i < 3; i++) if (g_face_items[i]) g_face_items[i].state = g_face_layout == i;
     if (g_swap_item) g_swap_item.state = g_swap_ab;
     if (g_fullscreen_item) g_fullscreen_item.state = g_start_fullscreen;
@@ -219,13 +262,13 @@ static int32_t pad_axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) *
 static void pad_read(GCExtendedGamepad *g) {
     int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller); if (p < 0) return;
     dm_haptics_apple_controller(p, g.controller);
-    uint64_t m = pad_face_buttons(g, pad_face_swap_abxy(g.controller));
+    uint64_t m = pad_face_buttons(g, pad_face_swap_abxy(g.controller,p), player_swap(p));
     #define K(btn, bit) if (btn.isPressed) m |= bit
     K(g.leftShoulder, DM_BTN_L); K(g.rightShoulder, DM_BTN_R); K(g.leftTrigger, DM_BTN_ZL); K(g.rightTrigger, DM_BTN_ZR);
     K(g.buttonMenu, DM_BTN_PLUS); K(g.buttonOptions, DM_BTN_MINUS); K(g.leftThumbstickButton, DM_BTN_LS); K(g.rightThumbstickButton, DM_BTN_RS);   // nil on pads without them: not pressed
     K(g.dpad.left, DM_BTN_LEFT); K(g.dpad.up, DM_BTN_UP); K(g.dpad.right, DM_BTN_RIGHT); K(g.dpad.down, DM_BTN_DOWN);
     #undef K
-    dm_pad_set_player(p, m, pad_axis(g.leftThumbstick.xAxis.value), pad_axis(g.leftThumbstick.yAxis.value), pad_axis(g.rightThumbstick.xAxis.value), pad_axis(g.rightThumbstick.yAxis.value));
+    pad_publish((__bridge const void *)g.controller,p,m,pad_axis(g.leftThumbstick.xAxis.value),pad_axis(g.leftThumbstick.yAxis.value),pad_axis(g.rightThumbstick.xAxis.value),pad_axis(g.rightThumbstick.yAxis.value));
 }
 static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
 static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
@@ -234,6 +277,7 @@ static void pads_changed(GCController *gone) {
     if (g_merge) {
         int any = 0;
         for (GCController *c in GCController.controllers) if (c.extendedGamepad && c != gone) {
+            c.handlerQueue=dispatch_get_main_queue();pad_device_add((__bridge const void *)c,c.vendorName.UTF8String);
             any = 1; c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; pad_read(g); };
             pad_read(c.extendedGamepad);
         }
@@ -245,19 +289,41 @@ static void pads_changed(GCController *gone) {
         npad_name(p, nb, sizeof nb); LOG("controller '%s' disconnected: player %d (npad %s) is free", pad_name(g_held[p]), p + 1, nb);
         g_held[p].extendedGamepad.valueChangedHandler = nil;
         dm_haptics_apple_controller(p, nil);
-        pad_slot_free(&g_slots, (__bridge const void *)g_held[p]); g_held[p] = nil;
-        dm_pad_set_player(p, 0, 0, 0, 0, 0);   // nothing stays pressed
+        const void *key=(__bridge const void *)g_held[p];pad_slot_free(&g_slots,key);
+        [g_devices removeObjectForKey:[NSValue valueWithPointer:key]];g_held[p]=nil;
+        dm_pad_clear_player(p);
     }
     for (GCController *c in now) if (c.extendedGamepad && c != gone && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) {
         int p = pad_slot_take(&g_slots, (__bridge const void *)c, pad_name(c));
         if (p < 0) { LOG("controller '%s' connected: all %d players are taken, not used", pad_name(c), DM_PLAYERS); continue; }
         g_held[p] = c;
+        c.handlerQueue=dispatch_get_main_queue();pad_device_add((__bridge const void *)c,pad_name(c));
         c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; pad_read(g); };
         npad_name(p, nb, sizeof nb); LOG("controller '%s' connected: player %d (npad %s), face buttons by %s", pad_name(c), p + 1, nb,
-                                         pad_face_swap_abxy(c) ? "Nintendo labels" : "Xbox / PlayStation positions");
+                                         pad_face_swap_abxy(c,p) ? "Nintendo labels" : "Xbox / PlayStation positions");
         pad_read(c.extendedGamepad);
     }
     dm_pad_players(pad_slot_mask(&g_slots));
+}
+static void hid_input(const void *key, const hid_8bitdo *state) {
+    int p = g_merge ? 0 : pad_slot_of(&g_slots, key); if (p < 0) return;
+    pad_publish(key,p,hid_8bitdo_buttons(state,player_layout(p)==DM_FACE_LABEL,player_swap(p)),
+        state->lx, state->ly, state->rx, state->ry);
+}
+static void hid_connected(const void *key, const char *name) {
+    int p = g_merge ? 0 : pad_slot_take(&g_slots, key, name);
+    if (p < 0) { LOG("HID controller connected: all player slots are occupied"); return; }
+    pad_device_add(key,name);
+    LOG("HID controller '%s' connected: player %d", name, p + 1);
+    if (!g_merge) dm_pad_players(pad_slot_mask(&g_slots));
+}
+static void hid_removed(const void *key) {
+    int p = g_merge ? 0 : pad_slot_free(&g_slots, key);
+    [g_devices removeObjectForKey:[NSValue valueWithPointer:key]];
+    if (p < 0) return;
+    LOG("HID controller disconnected: player %d", p + 1);
+    if (!g_merge || (!front_hid_count() && !GCController.controllers.count)) dm_pad_clear_player(p);
+    if (!g_merge) dm_pad_players(pad_slot_mask(&g_slots));
 }
 static void pads_start(void) {
     const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
@@ -267,6 +333,46 @@ static void pads_start(void) {
     LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : g_kbd_own ? "the keyboard is player 1, each controller a player of its own from player 2 on (DM_KBD_PLAYER=own)"
                                                                            : "each controller is a player of its own, the keyboard plays with player 1");
     pads_changed(nil);
+    front_hid_start((front_hid_callbacks){hid_connected, hid_removed, hid_input});
+}
+
+static NSArray<DmControllerInfo *> *controllers_snapshot(void) {
+    NSMutableArray *out=[NSMutableArray new];
+    for (DmPadDevice *d in g_devices.allValues) {
+        int p=g_merge ? 0 : pad_slot_of(&g_slots,d.key);if(p<0)continue;
+        d.info.player=p;d.info.layout=g_player_layout[p];d.info.swapAB=player_swap(p);d.info.swapXY=g_player_swap_xy[p];[out addObject:d.info];
+    }
+    return [out sortedArrayUsingComparator:^NSComparisonResult(DmControllerInfo *a,DmControllerInfo *b){
+        if(a.player!=b.player)return a.player<b.player ? NSOrderedAscending:NSOrderedDescending;
+        return a.token<b.token ? NSOrderedAscending:a.token>b.token ? NSOrderedDescending:NSOrderedSame;
+    }];
+}
+static void controllers_change(NSUInteger token,DmControllerSetting setting,NSInteger value) {
+    DmPadDevice *device=nil;for(DmPadDevice *d in g_devices.allValues)if(d.info.token==token){device=d;break;}
+    if(!device)return;int p=g_merge ? 0 : pad_slot_of(&g_slots,device.key);if(p<0)return;
+    switch(setting){
+        case DmControllerPlayer: {
+            if(g_merge || value<0 || value>=DM_PLAYERS || (g_kbd_own&&value==0))return;
+            int to=(int)value;if(p==to)return;
+            dm_pad_clear_player(p);dm_pad_clear_player(to);dm_haptics_clear(p);dm_haptics_clear(to);
+            if(pad_slot_move(&g_slots,device.key,to)<0)return;
+            GCController *old=g_held[p];g_held[p]=g_held[to];g_held[to]=old;
+            dm_haptics_apple_controller(p,g_held[p]);dm_haptics_apple_controller(to,g_held[to]);
+            for(DmPadDevice *d in g_devices.allValues)d.armed=0;
+            dm_pad_players(pad_slot_mask(&g_slots));break;
+        }
+        case DmControllerLayout: if(value>=-1&&value<=2)g_player_layout[p]=(int)value;break;
+        case DmControllerSwapAB: if(value==0||value==1)g_player_swap[p]=(int)value;break;
+        case DmControllerSwapXY: if(value==0||value==1)g_player_swap_xy[p]=(int)value;break;
+        case DmControllerReset: g_player_layout[p]=g_player_swap[p]=-1;g_player_swap_xy[p]=0;break;
+    }
+    pad_settings_save();pad_apply_settings();
+}
+static void controllers_capture(BOOL testing) {
+    g_controller_testing=testing;dm_input_clear();
+    for(int p=0;p<DM_PLAYERS;p++){dm_pad_clear_player(p);dm_haptics_clear(p);}
+    if(testing)for(DmPadDevice *d in g_devices.allValues)d.armed=0;
+    pad_apply_settings();
 }
 
 // Mouse as a single-point touchscreen (front.h dm_touch_set): left button down / drag = finger 0, release = lifted. The content view takes the clicks,
@@ -304,6 +410,7 @@ static void pads_start(void) {
 - (void)resetController:(id)sender;
 - (void)toggleStartFullscreen:(NSMenuItem *)item;
 - (void)openSettings:(id)sender;
+- (void)openControllers:(id)sender;
 - (void)chooseOutput:(NSMenuItem *)item;
 - (void)toggleHints:(id)sender;
 @end
@@ -314,6 +421,7 @@ static void pads_start(void) {
 - (void)resetController:(id)sender { (void)sender; settings_changed(DmSettingResetController, 0); }
 - (void)toggleStartFullscreen:(NSMenuItem *)item { (void)item; settings_changed(DmSettingStartFullscreen, !g_start_fullscreen); }
 - (void)openSettings:(id)sender { (void)sender; [g_settings_panel showPanel]; }
+- (void)openControllers:(id)sender { (void)sender; [g_controllers_panel showPanel]; }
 - (void)chooseOutput:(NSMenuItem *)item { settings_changed(DmSettingOutput, item.tag); }
 - (void)toggleHints:(id)sender { (void)sender; settings_changed(DmSettingHints, !g_show_hints); }
 @end
@@ -321,8 +429,11 @@ static void pads_start(void) {
 static DmSettingsMenu *g_settings_menu_target;
 static void install_controller_menu(NSMenu *bar) {
     g_settings_menu_target = [DmSettingsMenu new];
-    NSMenu *controller = [[NSMenu alloc] initWithTitle:@"控制器"];
-    const char *titles[] = {"自动（推荐）", "按位置（Xbox / PlayStation）", "按标签（Nintendo）"};
+    NSMenu *controller = [[NSMenu alloc] initWithTitle:@"Controllers"];
+    NSMenuItem *setup=[controller addItemWithTitle:@"Controller setup…" action:@selector(openControllers:) keyEquivalent:@"c"];
+    setup.target=g_settings_menu_target;setup.keyEquivalentModifierMask=NSEventModifierFlagCommand|NSEventModifierFlagShift;
+    [controller addItem:NSMenuItem.separatorItem];
+    const char *titles[] = {"Automatic (recommended)", "Xbox / PlayStation positions", "Nintendo labels"};
     for (int i = 0; i < 3; i++) {
         NSMenuItem *item = [controller addItemWithTitle:@(titles[i]) action:@selector(chooseFaceLayout:) keyEquivalent:@""];
         item.target = g_settings_menu_target;
@@ -330,13 +441,13 @@ static void install_controller_menu(NSMenu *bar) {
         g_face_items[i] = item;
     }
     [controller addItem:NSMenuItem.separatorItem];
-    g_swap_item = [controller addItemWithTitle:@"交换 A / B" action:@selector(toggleSwapAB:) keyEquivalent:@""];
+    g_swap_item = [controller addItemWithTitle:@"Swap A / B" action:@selector(toggleSwapAB:) keyEquivalent:@""];
     g_swap_item.target = g_settings_menu_target;
-    [controller addItemWithTitle:@"恢复控制器默认设置" action:@selector(resetController:) keyEquivalent:@""].target = g_settings_menu_target;
-    [[bar addItemWithTitle:@"控制器" action:nil keyEquivalent:@""] setSubmenu:controller];
+    [controller addItemWithTitle:@"Reset controller layout" action:@selector(resetController:) keyEquivalent:@""].target = g_settings_menu_target;
+    [[bar addItemWithTitle:@"Controllers" action:nil keyEquivalent:@""] setSubmenu:controller];
 
-    NSMenu *view = [[NSMenu alloc] initWithTitle:@"显示"];
-    g_fullscreen_item = [view addItemWithTitle:@"下次启动时全屏" action:@selector(toggleStartFullscreen:) keyEquivalent:@""];
+    NSMenu *view = [[NSMenu alloc] initWithTitle:@"Display"];
+    g_fullscreen_item = [view addItemWithTitle:@"Start in full screen" action:@selector(toggleStartFullscreen:) keyEquivalent:@""];
     g_fullscreen_item.target = g_settings_menu_target;
     NSMenu *outputs = [[NSMenu alloc] initWithTitle:dm_settings_text(@"输出尺寸上限", @"Output size cap")];
     NSArray<NSString *> *names = @[dm_settings_text(@"自动（随窗口）", @"Automatic (window size)"), @"720p", @"1080p", @"1440p", @"2160p"];
@@ -347,13 +458,13 @@ static void install_controller_menu(NSMenu *bar) {
     [[view addItemWithTitle:outputs.title action:nil keyEquivalent:@""] setSubmenu:outputs];
     g_hints_item = [view addItemWithTitle:dm_settings_text(@"快捷键提示", @"Shortcut hints") action:@selector(toggleHints:) keyEquivalent:@""];
     g_hints_item.target = g_settings_menu_target;
-    [[bar addItemWithTitle:@"显示" action:nil keyEquivalent:@""] setSubmenu:view];
+    [[bar addItemWithTitle:@"Display" action:nil keyEquivalent:@""] setSubmenu:view];
     pad_apply_settings();
 }
 
 static DmMacSettings settings_snapshot(void) {
     CGSize size = g_layer.drawableSize;
-    NSUInteger connected = 0; for (GCController *pad in GCController.controllers) if (pad.extendedGamepad) connected++;
+    NSUInteger connected = (NSUInteger)front_hid_count(); for (GCController *pad in GCController.controllers) if (pad.extendedGamepad) connected++;
     return (DmMacSettings){.face_layout = g_face_layout, .swap_ab = g_swap_ab, .start_fullscreen = g_start_fullscreen,
         .output_preset = g_output_preset, .show_hints = g_show_hints, .fullscreen = (g_win.styleMask & NSWindowStyleMaskFullScreen) != 0,
         .output_width = (NSUInteger)size.width, .output_height = (NSUInteger)size.height, .controllers = connected};
@@ -376,7 +487,9 @@ static void settings_changed(DmMacSetting setting, NSInteger value) {
         case DmSettingFullscreen:
             if (((g_win.styleMask & NSWindowStyleMaskFullScreen) != 0) != (value != 0)) [g_win toggleFullScreen:nil];
             break;
-        case DmSettingResetController: g_face_layout = DM_FACE_AUTO; g_swap_ab = 0; break;
+        case DmSettingResetController:
+            g_face_layout=DM_FACE_AUTO;g_swap_ab=0;for(int p=0;p<DM_PLAYERS;p++){g_player_layout[p]=g_player_swap[p]=-1;g_player_swap_xy[p]=0;}break;
+        case DmSettingControllerSetup: [g_controllers_panel showPanel];return;
     }
     pad_settings_save(); settings_refresh();
     LOG("front end: settings layout=%d swap_ab=%d output=%d hints=%d start_fullscreen=%d", g_face_layout, g_swap_ab, g_output_preset, g_show_hints, g_start_fullscreen);
@@ -423,6 +536,9 @@ void front_run(void (*guest)(void)) {
         pad_settings_load(); [(DmGameView *)v fitDrawable];
         g_settings_panel = [[DmSettingsPanel alloc] initWithParent:win snapshot:^{ return settings_snapshot(); }
             change:^(DmMacSetting setting, NSInteger value) { settings_changed(setting, value); }];
+        g_controllers_panel=[[DmControllersPanel alloc] initWithParent:win snapshot:^{return controllers_snapshot();}
+            change:^(NSUInteger token,DmControllerSetting setting,NSInteger value){controllers_change(token,setting,value);}
+            capture:^(BOOL testing){controllers_capture(testing);}];
         g_shortcut_hud = [[DmShortcutHUD alloc] initWithSnapshot:^{ return settings_snapshot(); }
             openSettings:^{ [g_settings_panel showPanel]; }];
         g_shortcut_hud.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
@@ -447,13 +563,16 @@ void front_run(void (*guest)(void)) {
                 pads_changed(conn ? nil : c); }];
         dm_haptics_apple_init();
         pads_start();
+        if (getenv("DM_CONTROLLER_SETUP") && !strcmp(getenv("DM_CONTROLLER_SETUP"),"1"))
+            dispatch_async(dispatch_get_main_queue(), ^{ [g_controllers_panel showPanel]; });
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;   // Only swallow keys for the game window; other windows such as the software keyboard input box receive typing as usual
             if (e.type == NSEventTypeKeyDown && (e.modifierFlags & NSEventModifierFlagCommand)) return e;   // ⌘ shortcuts go to the menu; a key released while ⌘ is held still reaches the game, or it would stay pressed
             if (!(e.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagControl | NSEventModifierFlagOption)) &&
-                (e.keyCode == 122 || e.keyCode == 18 || e.keyCode == 20 || e.keyCode == 22)) {
+                (e.keyCode == 122 || e.keyCode == 120 || e.keyCode == 18 || e.keyCode == 20 || e.keyCode == 22)) {
                 if (e.type == NSEventTypeKeyDown && !e.isARepeat) {
                     if (e.keyCode == 122) [g_settings_panel showPanel];
+                    else if (e.keyCode == 120) [g_controllers_panel showPanel];
                     else if (e.keyCode == 18) settings_changed(DmSettingHints, !g_show_hints);
                     else if (e.keyCode == 20) settings_changed(DmSettingOutput, (g_output_preset + 1) % 5);
                     else settings_changed(DmSettingFaceLayout, (g_face_layout + 1) % 3);

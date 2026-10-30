@@ -2,6 +2,7 @@
 // game's supported npad ids; no controller, window or guest exists in this test (the hid take-overs are called directly, events are recorded by the stubs)
 #include "../hle_hid.c"
 #include "../pad_slots.h"
+#include "../hid_8bitdo.h"
 
 static int checks, fails, g_mode = 1, g_signals;
 static void *g_signalled;
@@ -25,6 +26,9 @@ void dm_ctl_cvar_i32(uint64_t off, int32_t v) { (void)off; (void)v; }
 void dm_ctl_cvar_f32(uint64_t off, float v) { (void)off; (void)v; }
 void dm_gfx_texdump_next(const char *path) { (void)path; }
 void dm_gfx_passdump_next(long n) { (void)n; }
+static int applet_depth, applet_opens, applet_closes_at_depth0;   // hle_oe.c: the applet stand-ins open and close their applet around the answer
+void dm_applet_enter(const char *name) { (void)name; applet_depth++; applet_opens++; }
+void dm_applet_leave(void) { applet_closes_at_depth0 += --applet_depth == 0; }
 
 static uint64_t buttons_of(uint32_t id, uint32_t style) { NpadState s; fill(&s, id, style); return s.attributes ? s.buttons & 0xffff : 0; }
 static int32_t lx_of(uint32_t id) { NpadState s; fill(&s, id, STYLE_FULLKEY); return s.lx; }
@@ -75,8 +79,15 @@ static void t_npads(void) {
     CHECK(h_hid_Led(&(uint32_t){0}) == 0x1 && h_hid_Led(&(uint32_t){1}) == 0x3 && h_hid_Led(&(uint32_t){7}) == 0x6, "player LED patterns");
     int32_t info[2]; int8_t arg[8] = {1, 4};
     CHECK(h_hid_ShowCtrl(info, arg) == RES_OK && info[0] == 2 && info[1] == 0, "the controller applet reports two players, player 1 selected");
+    CHECK(applet_opens == 1 && applet_depth == 0 && applet_closes_at_depth0 == 1, "the controller applet opens and closes once around its answer (focus 2, then 1)");
     arg[1] = 1; h_hid_ShowCtrl(info, arg);
     CHECK(info[0] == 1, "the applet's count is capped at the game's maximum");
+    arg[0] = 3; arg[1] = 4;
+    CHECK(h_hid_ShowCtrl(info, arg) == RES_CTRL_CANCELED && info[0] == 2, "fewer players than the game's minimum: canceled (2202-3101), as the player closing the applet");
+    CHECK(h_hid_ShowCtrl0(arg) == RES_CTRL_CANCELED, "the overload without a result: canceled too");
+    arg[0] = 2; CHECK(h_hid_ShowCtrl0(arg) == RES_OK, "the overload without a result: OK when the minimum is met");
+    CHECK(applet_opens == 5 && applet_depth == 0, "every answer opened and closed its applet");
+    arg[0] = 1;
     CHECK(six_connected(0x0100 | 0) && !six_connected(0x0200 | 0), "player 2 has a six-axis sensor, No3 none");
 
     // A one-player game ({No1, Handheld}): player 2's controller plays as player 1, No2 reads as not connected
@@ -146,10 +157,85 @@ static void t_vibration(void) {
     CHECK(!h_hid_VibPermit(), "disconnecting the last output disables vibration");
 }
 
+static void t_8bitdo(void) {
+    hid_8bitdo a = {0}, b = {0};
+    CHECK(hid_8bitdo_buttons(&a, 0, 0) == 0, "new HID controller starts neutral");
+    hid_8bitdo_value(&a, 9, 1, 1, 0, 1);
+    CHECK(hid_8bitdo_buttons(&a, 0, 0) == DM_BTN_A, "Ultimate 2C physical A maps to A");
+    CHECK(hid_8bitdo_buttons(&a, 1, 0) == DM_BTN_B && hid_8bitdo_buttons(&a, 0, 1) == DM_BTN_B,
+        "HID follows face-layout and A/B settings");
+    hid_8bitdo_value(&a, 9, 3, 1, 0, 1);
+    CHECK(hid_8bitdo_buttons(&a, 0, 0) == DM_BTN_A, "extra paddle is not mistaken for X");
+    hid_8bitdo_value(&b, 9, 4, 1, 0, 1);
+    CHECK(hid_8bitdo_buttons(&b, 0, 0) == DM_BTN_X, "noncontiguous Ultimate 2C X usage");
+    hid_8bitdo_value(&a, 1, 0x30, 255, 0, 255); hid_8bitdo_value(&a, 1, 0x31, 0, 0, 255);
+    CHECK(a.lx == 32767 && a.ly == 32767, "both left-stick axes reach full scale with up positive");
+    hid_8bitdo_value(&a, 1, 0x32, 0, 0, 255); hid_8bitdo_value(&a, 1, 0x35, 255, 0, 255);
+    CHECK(a.rx == -32767 && a.ry == -32767, "right-stick usage mapping and vertical sign");
+    hid_8bitdo_value(&b, 1, 0x30, 127, 0, 255); hid_8bitdo_value(&b, 1, 0x31, 128, 0, 255);
+    CHECK(b.lx == 0 && b.ly == 0, "both integer center values stay neutral");
+    CHECK(hid_8bitdo_axis(500, 0, 255) == 32767 && hid_8bitdo_axis(-100, 0, 255) == -32767
+        && hid_8bitdo_axis(1, 1, 1) == 0, "axes clamp invalid samples and reject empty ranges");
+    hid_8bitdo_value(&a, 1, 0x39, 1, 0, 7);
+    CHECK((hid_8bitdo_buttons(&a, 0, 0) & 0xf000) == (DM_BTN_UP | DM_BTN_RIGHT), "diagonal hat reports both directions");
+    hid_8bitdo_value(&a, 1, 0x39, 8, 0, 7);
+    CHECK(!(hid_8bitdo_buttons(&a, 0, 0) & 0xf000), "hat null value releases all directions");
+    hid_8bitdo_value(&a, 2, 0xc5, 255, 0, 255); hid_8bitdo_value(&b, 2, 0xc4, 255, 0, 255);
+    CHECK((hid_8bitdo_buttons(&a, 0, 0) & (DM_BTN_ZL | DM_BTN_ZR)) == DM_BTN_ZL
+        && (hid_8bitdo_buttons(&b, 0, 0) & (DM_BTN_ZL | DM_BTN_ZR)) == DM_BTN_ZR, "left and right analog triggers stay separate");
+
+    // Feed two identically named HID pads through the real per-player HID path.
+    pad_slots slots = {0}; static char device1, device2, reconnected;
+    int p1 = pad_slot_take(&slots, &device1, "8BitDo Ultimate 2C");
+    int p2 = pad_slot_take(&slots, &device2, "8BitDo Ultimate 2C");
+    CHECK(p1 == 0 && p2 == 1, "two pads of the same model get separate players");
+    g_mode = 1; ids((uint32_t[]){0, 1}, 2); dm_input_set(0, 0, 0, 0, 0);
+    dm_pad_players(pad_slot_mask(&slots));
+    dm_pad_set_player(p1, hid_8bitdo_buttons(&a, 0, 0), a.lx, a.ly, a.rx, a.ry);
+    dm_pad_set_player(p2, hid_8bitdo_buttons(&b, 0, 0), b.lx, b.ly, b.rx, b.ry);
+    CHECK(buttons_of(0, STYLE_FULLKEY) == (DM_BTN_A | DM_BTN_ZL)
+        && buttons_of(1, STYLE_FULLKEY) == (DM_BTN_X | DM_BTN_ZR), "game reads independent buttons from both HID pads");
+    CHECK(lx_of(0) == 32767 && lx_of(1) == 0, "game reads independent sticks from both HID pads");
+    pad_slot_free(&slots, &device2); dm_pad_set_player(p2, 0, 0, 0, 0, 0); dm_pad_players(pad_slot_mask(&slots));
+    CHECK(buttons_of(1, STYLE_FULLKEY) == 0 && buttons_of(0, STYLE_FULLKEY) == (DM_BTN_A | DM_BTN_ZL),
+        "disconnect releases player 2 without disturbing player 1");
+    CHECK(pad_slot_take(&slots, &reconnected, "8BitDo Ultimate 2C") == 1, "reconnected HID pad recovers its player slot");
+}
+
+static void t_setup(void) {
+    pad_slots slots={0};static char first,second,reconnected;
+    CHECK(pad_slot_take(&slots,&first,"8BitDo Ultimate 2C")==0 && pad_slot_take(&slots,&second,"8BitDo Ultimate 2C")==1,"setup starts with two identical pads on separate players");
+    CHECK(pad_slot_move(&slots,&second,0)==0 && pad_slot_of(&slots,&first)==1 && pad_slot_mask(&slots)==3,"moving onto an occupied player swaps both devices without merging them");
+    CHECK(pad_slot_move(&slots,&first,2)==2 && pad_slot_of(&slots,&second)==0 && !slots.owner[1],"moving to an empty player frees the previous slot");
+    CHECK(pad_slot_free(&slots,&first)==2 && pad_slot_take(&slots,&reconnected,"8BitDo Ultimate 2C")==2,"the moved controller's reconnect name follows its assigned slot");
+    CHECK(pad_slot_move(&slots,NULL,0)==-1 && pad_slot_move(&slots,&second,DM_PLAYERS)==-1 && pad_slot_of(&slots,&second)==0,"invalid assignments cannot change the slot table");
+    g_mode=1;ids((uint32_t[]){0,1},2);dm_pad_players(3);dm_input_clear();
+    dm_pad_clear_player(0);dm_pad_clear_player(1);
+    dm_pad_set_player(1,DM_BTN_B,20000,0,0,0);dm_pad_clear_player(1);
+    CHECK(buttons_of(1,STYLE_FULLKEY)==0 && lx_of(1)==0,"clearing a player discards held input and unconsumed press edges");
+    dm_input_set(DM_BTN_Y,30000,0,0,0);dm_pad_set(DM_BTN_X,0,0,0,0);dm_input_clear();dm_pad_clear_player(0);
+    CHECK(buttons_of(0,STYLE_FULLKEY)==0 && lx_of(0)==0,"entering setup clears both keyboard and controller press latches");
+    int armed=1;
+    CHECK(!pad_input_allow(&armed,1,DM_BTN_A,0,0,0,0) && !armed,"button testing does not publish to the game");
+    CHECK(!pad_input_allow(&armed,0,DM_BTN_A,0,0,0,0),"closing setup with a button held does not leak that press");
+    CHECK(!pad_input_allow(&armed,0,0,7000,0,0,0),"a held stick also waits for neutral after setup");
+    CHECK(pad_input_allow(&armed,0,0,0,0,0,0) && armed,"neutral controls rearm the device");
+    if(pad_input_allow(&armed,0,DM_BTN_B,0,0,0,0))dm_pad_set_player(1,DM_BTN_B,0,0,0,0);
+    CHECK(buttons_of(1,STYLE_FULLKEY)==DM_BTN_B && buttons_of(0,STYLE_FULLKEY)==0,"a fresh press reaches only the assigned player's real Npad state");
+    CHECK(pad_swap_xy(DM_BTN_A|DM_BTN_X|DM_BTN_R,1)==(DM_BTN_A|DM_BTN_Y|DM_BTN_R),"X/Y swap preserves A/B and shoulder buttons");
+    CHECK(pad_swap_xy(DM_BTN_X|DM_BTN_Y,1)==(DM_BTN_X|DM_BTN_Y)&&pad_swap_xy(DM_BTN_X,0)==DM_BTN_X,"held X/Y and disabled swapping retain their semantics");
+    dm_pad_set_player(0,pad_swap_xy(DM_BTN_X,1),0,0,0,0);dm_pad_set_player(1,pad_swap_xy(DM_BTN_Y,1),0,0,0,0);
+    CHECK(buttons_of(0,STYLE_FULLKEY)==DM_BTN_Y&&buttons_of(1,STYLE_FULLKEY)==DM_BTN_X,"both players receive their independently swapped X/Y buttons");
+    dm_pad_set_player(1,DM_BTN_X,0,0,0,0);dm_pad_players(1);dm_pad_players(3);
+    CHECK(buttons_of(1,STYLE_FULLKEY)==0,"disconnect/reconnect cannot replay a queued button press");
+}
+
 int main(void) {
     t_slots();
     t_npads();
     t_vibration();
+    t_8bitdo();
+    t_setup();
     printf("hid players: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

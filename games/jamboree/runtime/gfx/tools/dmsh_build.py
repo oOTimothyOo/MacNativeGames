@@ -10,6 +10,7 @@
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately)
 import ast, inspect, os, re, sys, json, struct, hashlib, shutil, subprocess, tempfile, collections, threading, concurrent.futures as cf
 import dmsh_geometry
+import dmsh_subgroups
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
 dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
@@ -608,6 +609,22 @@ def vs_init(src):
     k += len('main0_out out = {};')
     return src[:k] + ''.join(f'\n    out.{n} = float4(0.0, 0.0, 0.0, 1.0);' for n in outs) + src[k:]
 
+VP_BASE_INSTANCE = '(*spvDescriptorSet0.vp_c0)._m0[100].y'   # c0 + 0x644: the driver's base-instance word
+
+def vs_base_instance(src):
+    """Use Metal's base instance for GPU-written indirect records as well as direct draws.
+
+    Backported from nxnative 8fa9b2d16348e96b9aa0983de0ba880b03881422.
+    The host cannot fill c0 + 0x644 from an indirect record written earlier on
+    the GPU. The word holds raw bits in a float4, so preserve its bit pattern.
+    Run before deriving the depth, geometry-capture and shadow-input entries.
+    """
+    if VP_BASE_INSTANCE not in src: return src
+    src = src.replace(VP_BASE_INSTANCE, 'as_type<float>(gl_BaseInstance)')
+    def add(m):
+        return m.group(0) if '[[base_instance]]' in m.group(0) else m.group(0)[:-1] + ', uint gl_BaseInstance [[base_instance]])'
+    return re.sub(r'\bvertex\s+\w+\s+main0\s*\((?:[^()]|\([^()]*\))*\)', add, src)
+
 def vs_layer(src):
     """A vertex shader that writes the layer (render_target_array_index) loses the point size output. The translator writes gl_PointSize = 1.0 in every vertex shader; Metal builds a pipeline
     whose vertex function writes the layer only with an input primitive class, and one that writes a point size only with the point class (or none), so with both no pipeline can be built.
@@ -714,7 +731,8 @@ def spv_single_lane(path):
     ballot the active lanes, shuffle the first lane's value to all, and take a fast path when all agree. With a subgroup of one lane that is exact: the ballot is the lane's own bit, shuffles and
     broadcasts return the lane's own value, all / any are the predicate, all-equal and elect are true, the lane ID is 0, the size 1 and the masks follow. The SPIR-V is rewritten that way
     (the builtin variables, their decorations and the subgroup capabilities removed). → True when rewritten, False when there is nothing to do or an operation it does not cover"""
-    d = open(path, 'rb').read(); words = list(struct.unpack(f'<{len(d) // 4}I', d)); hdr, ins, i = words[:5], [], 5
+    with open(path, 'rb') as stream: d = stream.read()
+    words = list(struct.unpack(f'<{len(d) // 4}I', d)); hdr, ins, i = words[:5], [], 5
     while i < len(words): n = words[i] >> 16; ins.append(words[i:i + n]); i += n
     op = lambda x: x[0] & 0xffff
     if not any(op(x) in SG_OPS or (op(x) == 71 and len(x) > 3 and x[2] == 11 and x[3] in SG_BUILTINS) for x in ins): return False
@@ -723,6 +741,25 @@ def spv_single_lane(path):
     uint = next((x[1] for x in ins if op(x) == 21 and x[2:4] == [32, 0]), None); boolt = next((x[1] for x in ins if op(x) == 20), None)
     uvec4 = next((x[1] for x in ins if op(x) == 23 and x[2] == uint and x[3] == 4), None)
     if uint is None or boolt is None or uvec4 is None: return False
+    # Some vertex producers read a mask component through OpAccessChain rather
+    # than loading the whole uvec4. In a singleton group the mask is already a
+    # constant: component zero is 0/1 and the other three components are zero.
+    # Only constant, direct component reads are covered; keep unknown pointer
+    # uses untouched so a failed conversion cannot leave invalid SPIR-V behind.
+    inttypes = {x[1] for x in ins if op(x) == 21 and x[2] == 32}
+    indices = {x[2]: x[3] for x in ins if op(x) == 43 and len(x) == 4 and x[1] in inttypes}
+    components = {}
+    for x in ins:
+        if op(x) == 65 and len(x) > 3 and x[3] in bvar:
+            kind = bvar[x[3]]
+            if len(x) != 5 or kind not in ('zero4', 'one4') or indices.get(x[4], -1) not in range(4): return False
+            components[x[2]] = 'one' if kind == 'one4' and indices[x[4]] == 0 else 'zero'
+    for x in ins:
+        o = op(x)
+        if o == 65 and len(x) > 2 and x[2] in components: continue
+        if o in (5, 71) and x[1] in components: continue
+        if o == 61 and len(x) == 4 and x[3] in components: continue
+        if any(v in components for v in x[1:]): return False
     bound = hdr[3]; c = {}
     for nm in ('zero', 'one', 'zero4', 'one4', 'true'): c[nm] = bound; bound += 1
     consts = [[43 | 4 << 16, uint, c['zero'], 0], [43 | 4 << 16, uint, c['one'], 1], [44 | 7 << 16, uvec4, c['zero4'], c['zero'], c['zero'], c['zero'], c['zero']],
@@ -732,11 +769,13 @@ def spv_single_lane(path):
         o = op(x)
         if o == 17 and x[1] in (61, 62, 63, 64, 65, 66, 67, 68, 4423, 4431): continue   # GroupNonUniform* / SubgroupBallotKHR / SubgroupVoteKHR capabilities
         if o == 10 and (b'ballot' in struct.pack(f'<{len(x) - 1}I', *x[1:]) or b'subgroup' in struct.pack(f'<{len(x) - 1}I', *x[1:])): continue
-        if o in (71, 5) and x[1] in bvar: continue   # the builtin's decoration and name
+        if o in (71, 5) and (x[1] in bvar or x[1] in components): continue   # the builtin's decoration and name
         if o == 59 and x[2] in bvar: continue        # the builtin variable itself
         if o == 15: x = _ep_drop(x, bvar)
         if o == 54 and not placed: out += consts; placed = True
         if o == 61 and x[3] in bvar: out.append([83 | 4 << 16, x[1], x[2], c[bvar[x[3]]]]); continue   # a load of a builtin → its constant
+        if o == 65 and x[2] in components: continue
+        if o == 61 and x[3] in components: out.append([83 | 4 << 16, x[1], x[2], c[components[x[3]]]]); continue
         if o in SG_OPS:
             kind = SG_OPS[o]
             if kind == 'ballot': out.append([169 | 6 << 16, x[1], x[2], x[4], c['one4'], c['zero4']]); continue   # OpSelect(pred, own bit, 0)
@@ -745,7 +784,8 @@ def spv_single_lane(path):
     if not placed: return False
     if any(op(x) == 65 and len(x) > 3 and x[3] in bvar for x in out): return False   # reached through an access chain: not covered
     hdr[3] = bound
-    flat = hdr + [v for x in out for v in x]; open(path, 'wb').write(struct.pack(f'<{len(flat)}I', *flat))
+    flat = hdr + [v for x in out for v in x]
+    with open(path, 'wb') as stream: stream.write(struct.pack(f'<{len(flat)}I', *flat))
     return True
 def _ep_drop(x, ids):   # OpEntryPoint without the given interface IDs: model, function, the name (a nul-terminated string in whole words), then the interface list
     k = 3
@@ -821,24 +861,28 @@ def finish(key, w, j, c1):
             return 'ok', '', refl
         try: return geometry_finish(key, w, j, c1)
         except (ValueError, subprocess.CalledProcessError) as e: return 'geometry failed', str(e)[:160], None
-    if j['stage'] == 'vs': spv_single_lane(os.path.join(w, key + '.spv'))   # one-lane subgroups (see spv_single_lane)
+    native_subgroups = j['stage'] == 'vs' and dmsh_subgroups.rewrite(os.path.join(w, key + '.spv'))
+    if j['stage'] == 'vs' and not native_subgroups: spv_single_lane(os.path.join(w, key + '.spv'))
     r = subprocess.run(['spirv-cross', *XC, os.path.join(w, key + '.spv'), '--output', msl], capture_output=True, text=True)
     if r.returncode: return 'MSL failed', r.stderr.strip()[:160], None
     src = open(msl).read()
+    if native_subgroups: src = dmsh_subgroups.metal(src)
     if j['stage'] == 'vs':   # second pass: re-translate with inputs that are only used as integers reported as uint (see int_inputs)
         extra = {l: t for l, t in int_inputs(src).items() if l not in j['attr']}
         if extra:
             j['attr'].update(extra); jp = os.path.join(w, f'job1_{key}.json'); json.dump([j], open(jp, 'w'))
             rx = subprocess.run([XLATE, jp, w], capture_output=True, text=True)
             if rx.returncode or not os.path.exists(os.path.join(w, key + '.spv')): return 'translation failed', ('integer-input retranslation: ' + rx.stderr.strip())[:160], None
-            spv_single_lane(os.path.join(w, key + '.spv'))
+            native_subgroups = dmsh_subgroups.rewrite(os.path.join(w, key + '.spv'))
+            if not native_subgroups: spv_single_lane(os.path.join(w, key + '.spv'))
             r = subprocess.run(['spirv-cross', *XC, os.path.join(w, key + '.spv'), '--output', msl], capture_output=True, text=True)
             if r.returncode: return 'MSL failed', r.stderr.strip()[:160], None
             src = open(msl).read()
+            if native_subgroups: src = dmsh_subgroups.metal(src)
     src = precise(src); open(msl, 'w').write(src)   # min / max / clamp with Maxwell's NaN results (see precise)
     pad = []
-    if j['stage'] == 'vs':   # outputs start as (0,0,0,1) (see vs_init); no point size beside a layer output (see vs_layer)
-        src = vs_layer(vs_init(src)); open(msl, 'w').write(src)
+    if j['stage'] == 'vs':   # initialized outputs, layer compatibility, and the actual base instance of direct/indirect draws
+        src = vs_base_instance(vs_layer(vs_init(src))); open(msl, 'w').write(src)
     if j['stage'] == 'vs' and PAIRS.get(key):   # outputs the pixel shader reads but the vertex shader does not write get (0,0,0,1) (see vs_pad)
         src, pad = vs_pad(key, src)
         if pad: open(msl, 'w').write(src)
@@ -873,7 +917,7 @@ def finish(key, w, j, c1):
             **({'entry_discard': 'main0_discard'} if discard else {}),
             **({'entry_tf': 'main0_tf', 'tf_strides': [e[2] if e else 0 for e in j['tf']]} if j.get('tf') else {}),
             **({'entry_layer': 'main0_l', 'entry_layer_z': 'main0_lz', 'layer_from': lay} if lay else {}), **({'entry_u': 'main0_u'} if fu else {}),
-            'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr),
+            'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['native vertex subgroups (active-lane rank)'] if native_subgroups else []) + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr),
             'bindings': reflect(key, j['stage'], src, res),
             'vertex_inputs': [{'location': int(m.group(2)), 'msl_type': m.group(1)} for m in re.finditer(r'(\w+)\s+\w+\s*\[\[attribute\((\d+)\)\]\]', src)],
             'raster': raster_facts(j['stage'], src), 'vs_pad': pad}

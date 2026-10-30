@@ -97,6 +97,8 @@ static NSView *row(NSString *title, NSView *control) {
     self.connected = label(@"", 11, NSColor.secondaryLabelColor);
     NSButton *reset = [NSButton buttonWithTitle:UI("恢复控制器默认设置", "Reset controller layout") target:self action:@selector(resetController:)];
     reset.bezelStyle = NSBezelStyleRounded;
+    NSButton *setup=[NSButton buttonWithTitle:@"Controller setup…  F2" target:self action:@selector(openControllers:)];
+    setup.identifier=@"settings-open-controllers";setup.accessibilityIdentifier=setup.identifier;
     NSTextField *quality = label(UI("画质：游戏原始设置", "Picture quality: original game settings"), 12, NSColor.labelColor);
     NSButton *taa = [NSButton checkboxWithTitle:UI("MetalFX 时间性边缘平滑（尚未适配）", "MetalFX temporal anti-aliasing (not yet supported)") target:nil action:nil];
     taa.enabled = NO; taa.identifier = @"settings-metalfx-unavailable"; taa.accessibilityIdentifier = @"settings-metalfx-unavailable";
@@ -107,7 +109,7 @@ static NSView *row(NSString *title, NSView *control) {
         "F1 / ⌘,  Settings  ·  1  Hints  ·  3  Output  ·  6  Controller\nWASD  Move  ·  J / K / U / I  A / B / X / Y  ·  Return  +"), 11, NSColor.secondaryLabelColor);
     NSStackView *body = column(@[heading, subtitle,
         card(UI("显示", "Display"), @[row(UI("输出上限", "Output cap"), self.output), self.dimensions, self.fullscreen, self.startup]),
-        card(UI("控制器", "Controller"), @[row(UI("按键布局", "Button layout"), self.face), self.swap, self.connected, reset]),
+        card(UI("控制器", "Controller"), @[setup,row(UI("按键布局", "Button layout"), self.face), self.swap, self.connected, reset]),
         card(UI("画质", "Picture quality"), @[quality, taa, note]),
         card(UI("快捷键", "Shortcuts"), @[self.hints, keys])], 12);
     body.translatesAutoresizingMaskIntoConstraints = NO;
@@ -156,6 +158,7 @@ static NSView *row(NSString *title, NSView *control) {
     self.change((DmMacSetting)control.tag, value); [self refresh];
 }
 - (void)resetController:(id)sender { (void)sender; self.change(DmSettingResetController, 0); [self refresh]; }
+- (void)openControllers:(id)sender { (void)sender;self.change(DmSettingControllerSetup,0); }
 - (void)refresh {
     DmMacSettings s = self.snapshot();
     [self.output selectItemWithTag:s.output_preset]; [self.face selectItemWithTag:s.face_layout];

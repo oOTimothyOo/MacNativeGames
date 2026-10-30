@@ -3606,10 +3606,16 @@ static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
     // (151607c7a92386cc reads the level above at an explicit LOD) and tests occlusion boxes against it; averaged, the pyramid is nearer than the scene at depth edges. Metal ignores the reduction
     // with a nearest or no mip filter, so such samplers filter mips linearly: at the integer LODs reductions are used with that gives the same level, and a sampler without mips keeps to the base
     // level through the LOD clamp
-    if (p.reduction == 1 || p.reduction == 2) {
+    // API availability is not device support: min/max reduction needs Apple10.
+    // Eden drops unsupported reduction while retaining filters/addressing/LOD
+    // (vk_texture_cache.cpp Sampler::Sampler); use that same explicit fallback.
+    if ((p.reduction == 1 || p.reduction == 2) && [g_dev supportsFamily:MTLGPUFamilyApple10]) {
         d.reductionMode = p.reduction == 1 ? MTLSamplerReductionModeMinimum : MTLSamplerReductionModeMaximum;
         if (d.mipFilter == MTLSamplerMipFilterNotMipmapped) { d.lodMinClamp = 0; d.lodMaxClamp = 0; }
         d.mipFilter = MTLSamplerMipFilterLinear;
+    } else if (p.reduction == 1 || p.reduction == 2) {
+        static int logged;
+        if (!logged++) MLOG("sampler min/max reduction is unsupported on this GPU: using weighted-average reduction with the requested filters, addressing and LOD (Eden fallback)");
     }
     d.borderColor = p.border[3] > 0.5f ? (p.border[0] > 0.5f ? MTLSamplerBorderColorOpaqueWhite : MTLSamplerBorderColorOpaqueBlack) : MTLSamplerBorderColorTransparentBlack;
     d.supportArgumentBuffers = YES;
@@ -5075,6 +5081,9 @@ static void rt_sub(const p_set_rt *r, int k, uint64_t *ser, int *lv, int *sl);
 static void pso_predict_rest(void) {
     if (!g_exec_next) return;
     static typeof(S) Ssave; memcpy(&Ssave, &S, sizeof S);
+    // state_op also updates replay state (notably OP_SCISSOR). Prediction must
+    // leave the current draw's clipping and render targets unchanged.
+    typeof(R) Rsave = R;
     int pso_dirty = g_pso_dirty, dss_dirty = g_dss_dirty;
     uint32_t cf[8]; memcpy(cf, g_pass.cfmt, sizeof cf); uint32_t df = g_pass.dfmt, sf = g_pass.sfmt, samples = g_pass.samples, dfull = df, sfull = sf; int kicked0 = (int)g_pp_kicked, draws = 0;
     fz_cursor cur = {.p = g_exec_next};
@@ -5116,7 +5125,7 @@ static void pso_predict_rest(void) {
     int admitted = 0;
     for (int i = 0; i < na && admitted < PSO_PREDICT_BUDGET; i++) admitted += pso_pend_kick(&qa[i].k, (__bridge NvShader *)qa[i].vs, (__bridge NvShader *)qa[i].fs);
     for (int i = 0; i < nb && admitted < PSO_PREDICT_BUDGET; i++) admitted += pso_pend_kick(&qb[i].k, (__bridge NvShader *)qb[i].vs, (__bridge NvShader *)qb[i].fs);
-    memcpy(&S, &Ssave, sizeof S); args_dirty_all(); g_pso_dirty = pso_dirty; g_dss_dirty = dss_dirty; prog_resolve();
+    memcpy(&S, &Ssave, sizeof S); R = Rsave; args_dirty_all(); g_pso_dirty = pso_dirty; g_dss_dirty = dss_dirty; prog_resolve();
     static int logged; if (g_pp_kicked > (uint64_t)kicked0 && logged++ < 20) MLOG("parallel precompile: %d draws left in this submission, %d pipelines handed to the background", draws, (int)g_pp_kicked - kicked0);
 }
 

@@ -10,6 +10,7 @@ static NSView *find(NSView *view, NSString *identifier) {
     return nil;
 }
 static int failures, checks;
+static int controller_opens;
 #define CHECK(NAME, CONDITION) do { checks++; if (!(CONDITION)) { failures++; fprintf(stderr, "FAIL: %s\n", NAME); } } while (0)
 static void change(DmMacSetting key, NSInteger value) {
     switch (key) {
@@ -20,6 +21,7 @@ static void change(DmMacSetting key, NSInteger value) {
         case DmSettingHints: state.show_hints = (int)value; break;
         case DmSettingFullscreen: state.fullscreen = (int)value; break;
         case DmSettingResetController: state.face_layout=state.swap_ab=0; break;
+        case DmSettingControllerSetup: controller_opens++;break;
     }
 }
 int main(int argc, const char **argv) { @autoreleasepool {
@@ -58,6 +60,8 @@ int main(int argc, const char **argv) { @autoreleasepool {
         CHECK("reopening preserves selected layout",face.selectedItem.tag==2&&swap.state==NSControlStateValueOn);
         NSButton *taa=(id)find(panel.window.contentView,@"settings-metalfx-unavailable");
         CHECK("unsupported MetalFX cannot be enabled",taa&&!taa.enabled&&taa.state==NSControlStateValueOff);
+        NSButton *controllers=(id)find(panel.window.contentView,@"settings-open-controllers");[controllers performClick:nil];
+        CHECK("settings opens the dedicated controller setup",controllers&&controller_opens==1);
         DmOutputSize s=dm_output_size(3840,2160,0);CHECK("automatic keeps native pixels",s.width==3840&&s.height==2160);
         s=dm_output_size(1280,720,4);CHECK("cap never upscales small windows",s.width==1280&&s.height==720);
         s=dm_output_size(2560,1504,2);CHECK("non-16:9 window preserves aspect",s.height==1080&&fabs((double)s.width/s.height-2560.0/1504)<.002);

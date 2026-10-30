@@ -37,6 +37,7 @@ static class P {
         Nca ctrl = Pick(updPkg ?? basePkg, NcaContentType.Control, baseProg.Header.TitleId);
         Console.WriteLine($"title {baseProg.Header.TitleId:x16}" + (updProg != null ? $", update {updProg.Header.TitleId:x16}" : ""));
         string outDir = a[3], cmpDir = a.Length > 4 ? a[4] : null;
+        ExtractionPaths.CheckRoot(outDir);
         if (ctrl != null) {   // control data (NACP): display version and game name; a raw copy goes to <output dir>/control.nacp for naming the app
             byte[] nacp = Nacp(ctrl);
             Console.WriteLine($"display version {System.Text.Encoding.ASCII.GetString(nacp, 0x3060, 0x10).TrimEnd('\0')}");
@@ -85,6 +86,7 @@ static class P {
 
     // DLC NSP: one data NCA (content type PublicData / Data) + a meta NCA + the ticket; only the data NCA's RomFS is written
     static int Aoc(KeySet ks, string nsp, string outDir) {
+        ExtractionPaths.CheckRoot(outDir);
         var pkg = OpenNsp(ks, nsp);
         Nca data = Pick(pkg, NcaContentType.PublicData) ?? Pick(pkg, NcaContentType.Data) ?? throw new Exception("no data NCA in the DLC NSP");
         Console.WriteLine($"add-on content {data.Header.TitleId:x16}");
@@ -165,14 +167,15 @@ static class P {
 
     // Copy out file by file; files identical to the same path in the compare dir become APFS clones instead
     static void Copy(IFileSystem fs, string dst, string cmpDir) {
+        ExtractionPaths.CheckRoot(dst);
         long n = 0, cloned = 0, bytes = 0, written = 0; byte[] buf = new byte[4 << 20], cb = new byte[4 << 20];
         foreach (DirectoryEntryEx e in fs.EnumerateEntries("*", SearchOptions.RecurseSubdirectories)) {
-            string rel = e.FullPath.TrimStart('/'), op = Path.Combine(dst, rel);
+            string op = ExtractionPaths.Resolve(dst, e.FullPath);
             if (e.Type == DirectoryEntryType.Directory) { Directory.CreateDirectory(op); continue; }
             Directory.CreateDirectory(Path.GetDirectoryName(op)); n++; bytes += e.Size;
             using var f = new UniqueRef<IFile>();
             fs.OpenFile(ref f.Ref, e.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
-            string cp = cmpDir == null ? null : Path.Combine(cmpDir, rel);
+            string cp = cmpDir == null ? null : ExtractionPaths.Resolve(cmpDir, e.FullPath);
             if (cp != null && File.Exists(cp) && new FileInfo(cp).Length == e.Size && Same(f.Get, cp, e.Size, buf, cb)) {
                 if (File.Exists(op)) File.Delete(op);
                 if (clonefile(cp, op, 0) != 0) throw new IOException($"clonefile {cp} → {op} failed: errno {Marshal.GetLastWin32Error()}");

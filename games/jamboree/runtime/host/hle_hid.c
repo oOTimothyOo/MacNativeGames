@@ -54,6 +54,14 @@ void dm_pad_set_player(int p, uint64_t buttons, int32_t lx, int32_t ly, int32_t 
     uint64_t old = atomic_exchange(&g_pad_btn[p], buttons); atomic_fetch_or(&g_pad_latch[p], buttons & ~old); atomic_store(&g_pad_axes[p], pack(lx, ly, rx, ry));
     if (!p) shake_note();
 }
+void dm_pad_clear_player(int p) {
+    if (p < 0 || p >= DM_PLAYERS) return;
+    atomic_store(&g_pad_btn[p], 0); atomic_store(&g_pad_latch[p], 0); atomic_store(&g_pad_axes[p], 0);
+    if (!p) shake_note();
+}
+void dm_input_clear(void) {
+    atomic_store(&g_btn, 0); atomic_store(&g_latch, 0); atomic_store(&g_axes, 0); shake_note();
+}
 void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) { dm_pad_set_player(0, buttons, lx, ly, rx, ry); }
 uint64_t dm_input_samples(void) { return (uint64_t)atomic_load(&g_sampling); }
 // DM_KEYS scripted input (for tests): "seconds:key[+key][~hold seconds][*count/interval seconds],...", e.g. "8:A,12:A,15:Down~0.5,16:A+B,40:A*80/2" (A every 2 s from 40 s on, 80 times). Key names A B X Y LS RS L R ZL ZR (plus the sticks LLeft LUp LRight LDown and RLeft RUp RRight RDown) Plus Minus Left Up Right Down, left stick LLeft LUp LRight LDown,
@@ -211,7 +219,7 @@ void dm_pad_players(uint32_t mask) {
     mask = (mask | 1u) & ((1u << DM_PLAYERS) - 1);
     uint32_t old = atomic_exchange(&g_players, mask);
     for (int p = 1; p < DM_PLAYERS; p++) if ((old ^ mask) >> p & 1) {
-        if (!(mask >> p & 1)) dm_pad_set_player(p, 0, 0, 0, 0, 0);   // a controller that went away leaves nothing pressed
+        if (!(mask >> p & 1)) dm_pad_clear_player(p);   // no held buttons or queued edges survive a disconnect
         if (atomic_load(&g_ids_supported) & id_bit((uint32_t)p)) style_changed((uint32_t)p);
     }
     note_merged();
@@ -286,13 +294,23 @@ HLE_FORCE("_ZN2nn3hid18SwapNpadAssignmentERKjS2_", "swap controller ids; ignored
 HLE_FORCE("_ZN2nn3hid21StartLrAssignmentModeEv", "L/R assignment mode; ignored by the host", void, h_hid_LrStart, void) {}
 HLE_FORCE("_ZN2nn3hid20StopLrAssignmentModeEv", "L/R assignment mode; ignored by the host", void, h_hid_LrStop, void) {}
 // Controller applet (system UI): report the connected players right away, with player 1's controller selected. ControllerSupportResultInfo = { int playerCount; uint32_t selectedId; };
-// ControllerSupportArg starts with { int8 playerCountMin, playerCountMax }: the count is capped at the maximum (a min the connected players do not reach is not waited for, as before)
-HLE_FORCE("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "controller applet; the host reports the connected players right away",
-          Result, h_hid_ShowCtrl, int32_t *info, const int8_t *arg) {
+// ControllerSupportArg starts with { int8 playerCountMin, playerCountMax }: the count is capped at the maximum. Fewer players than the minimum: on a Switch the applet stays open
+// until enough controllers connect or the player closes it, and the SDK's ShowControllerSupportCore (Mario Kart 8 Deluxe 4.0.0 sdk+0x24eeb0) turns the applet's result into
+// 0 success, 2 → 2202-3102, anything else → ResultControllerSupportCanceled (2202-3101). The host has nothing to wait for, so it answers as the player closing it. An OK with
+// fewer players is an answer a Switch never gives: Mario Kart 8 Deluxe asks for two in 2P and opened the applet again every few frames on it (GitHub issue #550)
+#define RES_CTRL_CANCELED (202u | 3101u << 9)
+static Result ctrl_support(int32_t *info, const int8_t *arg) {
     int count = 0; for (int p = 0; p < DM_PLAYERS; p++) count += reported(p);
+    int canceled = arg && arg[0] > count;
+    if (arg) LOG("hid controller applet: %d to %d players wanted, %d connected%s", arg[0], arg[1], count, canceled ? ": too few, closed as the player would (canceled)" : "");
     if (arg && arg[1] > 0 && count > arg[1]) count = arg[1];
     if (info) { info[0] = count; info[1] = (int32_t)connected_id(); }
-    return RES_OK;
+    return canceled ? RES_CTRL_CANCELED : RES_OK;
+}
+HLE_FORCE("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "controller applet; the host reports the connected players right away (canceled with fewer than the minimum)",
+          Result, h_hid_ShowCtrl, int32_t *info, const int8_t *arg) {
+    DM_APPLET("controller support");
+    return ctrl_support(info, arg);
 }
 // Six-axis sensor (accelerometer + gyroscope) of the connected controller. SixAxisSensorState (0x60): acceleration in G, angular velocity in revolutions / s, angle in revolutions,
 // direction = the controller's three axes. At rest it lies flat: gravity (0, 0, -1), no rotation, the identity direction. While shaking (DM_BTN_SHAKE: the iPhone shaken, DmGamepad.m;
@@ -439,9 +457,9 @@ HLE_FORCE("_ZN2nn3hid19GetPlayerLedPatternERKj", "player LED: the Switch's patte
 static void ctrl_color(uint32_t *c) { c[0] = 0xff828282u; c[1] = 0xff0f0f0fu; }
 HLE_FORCE("_ZN2nn3hid22GetNpadControllerColorEPNS0_19NpadControllerColorERKj", "controller color", Result, h_hid_Color, uint32_t *c, const uint32_t *id) { (void)id; ctrl_color(c); return RES_OK; }
 HLE_FORCE("_ZN2nn3hid22GetNpadControllerColorEPNS0_19NpadControllerColorES2_RKj", "left and right Joy-Con colors", Result, h_hid_Color2, uint32_t *l, uint32_t *r, const uint32_t *id) { (void)id; ctrl_color(l); ctrl_color(r); return RES_OK; }
-HLE_FORCE("_ZN2nn3hid21ShowControllerSupportERKNS0_20ControllerSupportArgE", "controller applet (no result wanted); the host reports a selection right away", Result, h_hid_ShowCtrl0, const void *arg) { (void)arg; return RES_OK; }
-HLE_FORCE("_ZN2nn3hid24ShowControllerStrapGuideEv", "strap guide applet; not shown by the host", Result, h_hid_Strap, void) { return RES_OK; }
-HLE_FORCE("_ZN2nn3hid28ShowControllerFirmwareUpdateERKNS0_27ControllerFirmwareUpdateArgE", "controller firmware update applet; not shown by the host", Result, h_hid_FwUpd, const void *arg) { (void)arg; return RES_OK; }
+HLE_FORCE("_ZN2nn3hid21ShowControllerSupportERKNS0_20ControllerSupportArgE", "controller applet (no result wanted); the host answers as the overload above", Result, h_hid_ShowCtrl0, const int8_t *arg) { DM_APPLET("controller support"); return ctrl_support(NULL, arg); }
+HLE_FORCE("_ZN2nn3hid24ShowControllerStrapGuideEv", "strap guide applet; not shown by the host", Result, h_hid_Strap, void) { DM_APPLET("controller strap guide"); return RES_OK; }
+HLE_FORCE("_ZN2nn3hid28ShowControllerFirmwareUpdateERKNS0_27ControllerFirmwareUpdateArgE", "controller firmware update applet; not shown by the host", Result, h_hid_FwUpd, const void *arg) { DM_APPLET("controller firmware update"); (void)arg; return RES_OK; }
 
 // Touch screen: TouchScreenState<N> = { int64 sampling number; int32 count; int32 reserved; TouchState[N] }, filled from the front end's touch points (hle_touch.c touch_fill_n:
 // the Mac's mouse, the iPhone touches no gamepad control takes, DM_KEYS taps) in handheld mode, as on the Switch, whose screen is out of reach when docked: a game may read touches

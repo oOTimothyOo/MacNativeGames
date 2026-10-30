@@ -734,16 +734,21 @@ static int md_out_tex(mdec_t *d, int i, void *buf) {
     if (d->out[i].pic && d->out[i].frm) nvn_host_write_texture(tex, d->out[i].frm, w, h, (size_t)d->w * 4, NULL, NULL);
     void *sy = G.nvn_sync ? G.nvn_sync(buf) : NULL; if (sy && nvn_host_signal_sync(sy) && !d->red_dec++) LOG("[RED] movie: the buffer's sync object %p is not an NVNsync", sy);
     MD_TRACE(d, 12, "GetOutputBuffer index %d → texture %p (%d×%d format %#x)%s", i, tex, tw, th, f, d->out[i].pic ? "" : " (no picture: the texture keeps its last frame)");
-    if (d->out[i].flags & 4) atomic_store(&g_video_eos, 1);
+    if (d->out[i].flags & 4) {
+        atomic_store(&g_video_eos, 1);
+        LOG("[movie] native-texture EOS delivered");
+    }
     // DecoderImpl::GetOutputBuffer's mode-2 path calls CopyOutputBufferToClientTextureAndRelease, so GetOutputBuffer itself releases the output index. The client does not call
     // ReleaseOutputBufferIndex afterwards. Leaving the slot used here stopped Jamboree after its first 16 decoded frames: every slot stayed occupied, no more packets decoded, and
     // Movie::IsPlaybackCompleted never saw the end of the opening video.
     pthread_mutex_lock(&d->mu);
     d->out[i].used = 0;
     d->out[i].pic = 0;
-    int queued = d->npend;
+    int queued = d->npend, drain = d->avc_drain;
     pthread_mutex_unlock(&d->mu);
-    if (queued) md_pump(d);
+    // The automatic release must also resume a pending AVC drain, just like
+    // ReleaseOutputBufferIndex: at EOS there may be no input packets left.
+    if (queued || drain) md_pump(d);
     return 0;
 }
 HLE_FORCE("_ZN5movie7Decoder15GetOutputBufferEiPNS_6BufferE", "movie decoder: get a frame", int, h_movie_GetOut, void **self, int i, void *buf) {

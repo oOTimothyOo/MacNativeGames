@@ -20,6 +20,8 @@ uint64_t dm_input_samples(void);   // Cumulative number of times the game has sa
 #define DM_PLAYERS 8   // npads No1..No8; player 1 is the Handheld npad in handheld mode (DM_OPMODE=0)
 void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry);
 void dm_pad_set_player(int player, uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry);   // player 0..DM_PLAYERS-1 (player 1..8)
+void dm_pad_clear_player(int player);   // clear held input and queued press edges on reassignment, disconnect or input testing
+void dm_input_clear(void);             // keyboard/touch equivalent
 void dm_pad_players(uint32_t mask);   // bit p: player p + 1 has a controller; player 1 always counts as connected (the keyboard, the touch gamepad, DM_KEYS)
 uint32_t dm_player_npad(int player);  // the npad id the game reads player p + 1 on: Handheld (0x20) or No1 (0) for player 1, No n (id n - 1) for player n
 

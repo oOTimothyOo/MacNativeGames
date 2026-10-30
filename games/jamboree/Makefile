@@ -11,7 +11,17 @@ test:
 test-gpu:
 	@test -n "$(WORK)" || (echo 'Set WORK to a private directory outside the checkout'; exit 1)
 	$(PYTHON) scripts/test_gpu.py --work-dir "$(WORK)"
-.PHONY: test-ui
+.PHONY: test-ui test-movie test-controllers
+.PHONY: test-vertex-subgroups
+test-vertex-subgroups:
+	@test -n "$(WORK)" || (echo 'Set WORK to a private directory outside the checkout'; exit 1)
+	$(PYTHON) scripts/test_vertex_subgroups.py --work-dir "$(WORK)"
+test-controllers:
+	@test -n "$(WORK)" || (echo 'Set WORK to a private directory outside the checkout'; exit 1)
+	$(PYTHON) scripts/test_controllers.py --work-dir "$(WORK)"
+test-movie:
+	@test -n "$(WORK)" || (echo 'Set WORK to a private directory outside the checkout'; exit 1)
+	$(PYTHON) scripts/test_movie.py --work-dir "$(WORK)"
 test-ui:
 	@test -n "$(WORK)" || (echo 'Set WORK to a private directory outside the checkout'; exit 1)
 	$(PYTHON) scripts/test_settings.py --work-dir "$(WORK)"

@@ -7,7 +7,7 @@ typedef struct {
 } DmMacSettings;
 typedef NS_ENUM(NSInteger, DmMacSetting) {
     DmSettingFaceLayout, DmSettingSwapAB, DmSettingStartFullscreen,
-    DmSettingOutput, DmSettingHints, DmSettingFullscreen, DmSettingResetController
+    DmSettingOutput, DmSettingHints, DmSettingFullscreen, DmSettingResetController, DmSettingControllerSetup
 };
 typedef DmMacSettings (^DmSettingsSnapshot)(void);
 typedef void (^DmSettingsChange)(DmMacSetting setting, NSInteger value);

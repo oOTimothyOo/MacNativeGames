@@ -67,6 +67,8 @@ t_vbuf: t_vbuf.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_vbuf.m $(MTL_T_SRC) $(FW)
 t_geometry: t_geometry.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_geometry.m $(MTL_T_SRC) $(FW)
+t_vertex_subgroups: t_vertex_subgroups.m
+	clang $(CFLAGS) -fobjc-arc -o $@ t_vertex_subgroups.m -framework Foundation -framework Metal
 t_mip_extent: t_mip_extent.m ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_mip_extent.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 t_rt_range_shape: t_rt_range_shape.m $(MTL_T_DEP)
@@ -79,6 +81,14 @@ t_rt_depth_ro: t_rt_depth_ro.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_depth_ro.m $(MTL_T_SRC) $(FW)
 t_pso_pending: t_pso_pending.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_pending.m $(MTL_T_SRC) $(FW)
+t_pso_scissor: t_pso_scissor.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_scissor.m $(MTL_T_SRC) $(FW)
+t_base_instance: t_base_instance.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_base_instance.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pso_scissor
+check_t_pso_scissor: t_pso_scissor
+	MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ./t_pso_scissor
+run: check_t_pso_scissor
 t_pso_skey: t_pso_skey.m ../nvn/nvn_pso_skey.h ../nvn/nvn_obj.h
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_skey.m -framework Foundation
 t_view_swizzle: t_view_swizzle.m $(MTL_T_DEP)
@@ -95,6 +105,8 @@ t_pfv: t_pfv.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pfv.m $(MTL_T_SRC) $(FW)
 t_integer_blend: t_integer_blend.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_integer_blend.m $(MTL_T_SRC) $(FW)
+t_sampler_capability: t_sampler_capability.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_sampler_capability.m $(MTL_T_SRC) $(FW)
 t_primitive_restart: t_primitive_restart.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_primitive_restart.m $(MTL_T_SRC) $(FW)
 t_clear_ds: t_clear_ds.m $(MTL_T_DEP)

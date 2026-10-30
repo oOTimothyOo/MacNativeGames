@@ -27,7 +27,16 @@ run: $(B)/t_touch $(B)/t_gesture $(B)/t_oe $(B)/t_fs $(B)/t_fs_commit_list $(B)/
 	$(B)/t_haptics
 	$(B)/t_haptics_apple
 	$(B)/t_nro
-run: $(B)/t_nro
+	$(B)/t_movie_drain
+run: $(B)/t_nro $(B)/t_movie_drain
+.PHONY: movie
+.PHONY: hid
+hid: $(B)/t_hid
+	$(B)/t_hid
+movie: $(B)/t_movie_drain
+	$(B)/t_movie_drain
+$(B)/t_movie_drain: t_movie_drain.c ../hle_movie.c ../hle_movie_avc.h ../hle.h ../dm.h $(GAME_H) | $(B)
+	clang -arch arm64 -mmacosx-version-min=26.0 -O1 -g -Wall -Wextra -Wno-unused-function -ffunction-sections -fdata-sections -Wl,-dead_strip -I.. $(GINC) -I../../third_party/libvpx -I../../third_party/stb_vorbis -o $@ t_movie_drain.c -framework AudioToolbox
 $(B)/t_nro: t_nro.c ../loader.c ../hle_ro.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	clang -O1 -g -Wall -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_nro.c
 .PHONY: nro
@@ -61,7 +70,7 @@ $(B)/t_pctl: t_pctl.c ../hle_misc.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	clang -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_pctl.c
 $(B)/t_shared_font: t_shared_font.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	clang -O1 -Wall -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ t_shared_font.c
-$(B)/t_hid: t_hid.c ../hle_hid.c ../hle_haptics.c ../hle_haptics.h ../pad_slots.h ../dm_input.h ../hle.h ../dm.h $(GAME_H) | $(B)
+$(B)/t_hid: t_hid.c ../hle_hid.c ../hle_haptics.c ../hle_haptics.h ../pad_slots.h ../hid_8bitdo.h ../dm_input.h ../hle.h ../dm.h $(GAME_H) | $(B)
 	clang -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_hid.c ../hle_haptics.c
 $(B)/t_haptics: t_haptics.c ../hle_haptics.c ../hle_haptics.h ../dm_input.h | $(B)
 	clang -O1 -g -Wall -Werror -I.. -o $@ t_haptics.c ../hle_haptics.c
