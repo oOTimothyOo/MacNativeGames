@@ -1,0 +1,3 @@
+# Synthetic Python source regressions; versions match the validated local tools.
+lz4==4.4.5
+capstone==5.0.9

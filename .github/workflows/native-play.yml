@@ -22,5 +22,12 @@ jobs:
         run: python3 tools/native-play/build.py --output "$RUNNER_TEMP/Native Play.app" --work-dir "$RUNNER_TEMP/native-play-icon"
       - name: Check recovery, policy and native controls with synthetic state
         run: python3 tools/native-play/test.py --work-dir "$RUNNER_TEMP/native-play-tests" --app "$RUNNER_TEMP/Native Play.app"
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6, same pin as source CI
+        with:
+          python-version: '3.14'
+      - name: Provision pinned source-test packages in an isolated environment
+        run: |
+          python -m venv "$RUNNER_TEMP/jamboree-source-venv"
+          "$RUNNER_TEMP/jamboree-source-venv/bin/python" -m pip install --disable-pip-version-check --only-binary=:all: -r games/jamboree/test-requirements.txt
       - name: Check Jamboree packaging and shader-source regressions
-        run: python3 -m unittest discover -s games/jamboree/tests -v
+        run: '"$RUNNER_TEMP/jamboree-source-venv/bin/python" -m unittest discover -s games/jamboree/tests -v'
