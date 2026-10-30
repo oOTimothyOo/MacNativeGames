@@ -45,7 +45,7 @@ if args.app:
             subprocess.run(['clang', '-arch', 'arm64', '-mmacosx-version-min=26.0', '-O2', '-Wall', '-Wextra',
                             '-Werror', str(ROOT / 'fixture.c'), '-o', str(executable)], check=True)
             shutil.copy2(executable, host)
-        subprocess.run(['codesign', '--force', '--sign', '-', str(host)], check=True)
+        subprocess.run(['codesign', '--force', '--sign', '-', '--identifier', f'org.macnativegames.fixture.{name.lower()}', str(host)], check=True)
         adapter = {'adapter': 'dmhost-v2', 'managed_state': True}
         if name == 'LaunchServices':
             adapter['sandbox_entry'] = 'sandbox-exec-v1'

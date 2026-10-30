@@ -152,7 +152,7 @@ def package(source, build, output, language):
         subprocess.run(['clang', '-arch', 'arm64', '-mmacosx-version-min=26.0', '-O2', '-Wall', '-Wextra', '-Werror', str(GAME / 'app/launcher.c'),
                         '-o', str(macos / 'Jamboree')], check=True)
         # Sign the nested executable before recording its final content hash.
-        subprocess.run(['codesign', '--force', '--sign', '-', str(macos / 'GameHost')], check=True)
+        subprocess.run(['codesign', '--force', '--sign', '-', '--identifier', 'org.macnativegames.jamboree', str(macos / 'GameHost')], check=True)
         # Preserve the rewriter's rule hashes; add portable build provenance for reviewers.
         report = {'game': pins, 'chain': chain, 'shader_inputs': inputs, 'language': language,
                   'host_sha256': hashlib.sha256((macos / 'GameHost').read_bytes()).hexdigest(),

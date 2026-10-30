@@ -51,4 +51,6 @@ A synthetic packaging test builds the actual launcher and a Foundation probe, ve
 
 The managed launcher also supports a private `DM_NATIVE_PLAY_POLICY` file. Native Play uses Launch Services to establish the game identity, then the C entry point executes the system restriction tool before the engine. A content-free integration test verifies that the running bundle identity survives this path while networking and protected-file access remain denied. No global security setting is changed.
 
+The auxiliary runtime is signed with the app's bundle identifier rather than the build tool's generated `dmhost` identifier. Its final signed-file hash is recorded after signing; this changes signature bytes without changing executable code or shaders. Matching identifiers and a correct launch association are packaging checks, not a substitute for observing Game Mode in the OS.
+
 The [Native Play launcher](../../../tools/native-play/README.md) adds a multi-app Cocoa library, per-app launch preferences and per-title recovery controls without embedding game content.

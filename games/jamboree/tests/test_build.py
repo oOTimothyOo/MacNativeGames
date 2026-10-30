@@ -48,6 +48,9 @@ class BuildTests(unittest.TestCase):
             self.assertEqual(provenance['host_executable'], 'Contents/MacOS/GameHost')
             self.assertTrue(provenance['native_play']['managed_state'])
             self.assertFalse((app / 'Contents/Resources/game/dmhost').exists())
+            signed = subprocess.run(['codesign', '-d', '--verbose=4', str(app / provenance['host_executable'])],
+                                    capture_output=True, text=True, check=True)
+            self.assertIn(f"Identifier={info['CFBundleIdentifier']}\n", signed.stderr)
             state = root / 'managed-state'
             env = dict(os.environ, DM_STATE_DIR=str(state))
             subprocess.run([str(app / 'Contents/MacOS/Jamboree')], env=env, check=True)
