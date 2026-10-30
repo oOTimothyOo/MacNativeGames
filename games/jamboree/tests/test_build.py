@@ -59,6 +59,16 @@ class BuildTests(unittest.TestCase):
             self.assertEqual(Path(report['patched']), app / 'Contents/Resources/game/patched')
             self.assertEqual(report['language'], 'en-US')
             self.assertEqual(state.stat().st_mode & 0o777, 0o700)
+            policy = root / 'runtime.sb'
+            policy.write_text('(version 1)\n(allow default)\n(deny network*)\n')
+            policy.chmod(0o600)
+            subprocess.run([str(app / 'Contents/MacOS/Jamboree')],
+                           env=dict(env, DM_NATIVE_PLAY_POLICY=str(policy)), check=True)
+            self.assertEqual(json.loads((state / 'identity.json').read_text())['bundle_id'], info['CFBundleIdentifier'])
+            policy.chmod(0o644)
+            rejected_policy = subprocess.run([str(app / 'Contents/MacOS/Jamboree')],
+                                            env=dict(env, DM_NATIVE_PLAY_POLICY=str(policy)), capture_output=True)
+            self.assertNotEqual(rejected_policy.returncode, 0)
             linked = root / 'linked-state'
             linked.symlink_to(state, target_is_directory=True)
             rejected = subprocess.run([str(app / 'Contents/MacOS/Jamboree')],

@@ -6,6 +6,13 @@ FOUNDATION_EXPORT NSString *NPQuote(NSString *string);
 FOUNDATION_EXPORT NSDictionary *NPProfileSummary(NSURL *session);
 FOUNDATION_EXPORT void NPPruneSessions(NSURL *root);
 
+// A direct child has an exit status; Launch Services only reports termination.
+@interface NPGameSession : NSObject
+@property (readonly, getter=isRunning) BOOL running;
+@property (readonly) int processIdentifier;
+- (void)terminate;
+@end
+
 // DM-host bundles share a resource contract. Other native engines need an adapter.
 @interface NPStore : NSObject
 @property (readonly) NSURL *root;
@@ -29,6 +36,7 @@ FOUNDATION_EXPORT void NPPruneSessions(NSURL *root);
 - (void)setOptions:(NSDictionary *)options;
 - (NSString *)sandboxForSession:(NSURL *)session;
 - (NSDictionary<NSString *, NSString *> *)environmentForSession:(NSURL *)session controllers:(BOOL)controllers;
-- (nullable NSTask *)launch:(NSDictionary *)game controllers:(BOOL)controllers completion:(void (^)(int status, NSURL *session))completion error:(NSError **)error;
+// status -1 explicitly means the OS did not supply an exit status.
+- (nullable NPGameSession *)launch:(NSDictionary *)game controllers:(BOOL)controllers completion:(void (^)(int status, NSURL *session))completion error:(NSError **)error;
 @end
 NS_ASSUME_NONNULL_END

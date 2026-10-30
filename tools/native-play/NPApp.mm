@@ -152,7 +152,7 @@ BOOL Controllers(NSDictionary *game){return [game[@"controllers"] boolValue]||[g
 @property NSArray<NSDictionary *> *catalog,*filtered,*snapshots;
 @property NSMutableArray<NPSidebarButton *> *navigation;
 @property NSTableView *table;
-@property NSTask *task;
+@property NPGameSession *task;
 @property NSString *runningKey,*section,*selectedSnapshot;
 @property BOOL busy,externalRunning;
 @end
@@ -298,7 +298,7 @@ NSArray<NSDictionary *> *NPPreviewGames(void){return @[
     if(self.preview||self.busy||!self.game)return;
     if(self.task.running){[[NSRunningApplication runningApplicationWithProcessIdentifier:self.task.processIdentifier]activateWithOptions:0];return;}
     self.busy=YES;[self notice:@"Verifying the app and backing up its progress…"];NSDictionary *game=self.game;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{NSError *error=nil;NSTask *task=[self.store launch:game controllers:controllers completion:^(int status,NSURL *session){(void)session;dispatch_async(dispatch_get_main_queue(),^{self.task=nil;[self showSection:self.section];[self notice:status==0?@"Game closed. Progress is saved locally.":@"Game stopped. Its pre-launch backup is available."];if(!self.window.isVisible)[NSApp terminate:nil];});} error:&error];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{NSError *error=nil;NPGameSession *task=[self.store launch:game controllers:controllers completion:^(int status,NSURL *session){(void)session;dispatch_async(dispatch_get_main_queue(),^{self.task=nil;[self showSection:self.section];[self notice:status<=0?@"Game closed. Its pre-launch backup is available.":@"Game stopped. Its pre-launch backup is available."];if(!self.window.isVisible)[NSApp terminate:nil];});} error:&error];
         dispatch_async(dispatch_get_main_queue(),^{self.busy=NO;self.task=task;self.runningKey=[self.store keyForGame:game];if(!task)[self error:error];[self showSection:self.section];[self notice:task?@"Playing offline. Quit the game normally to finish its recording.":@"Launch stopped; your saved progress is preserved."];});});
 }
 - (void)setting:(NSSwitch *)sender{NSMutableDictionary *options=[self.store.options mutableCopy];options[sender.identifier]=@(sender.state==NSControlStateValueOn);[self.store setOptions:options];[self notice:@"Launch preference saved for this app."];}

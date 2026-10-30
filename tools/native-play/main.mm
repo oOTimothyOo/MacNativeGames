@@ -44,12 +44,13 @@ int main(int argc,const char **argv){@autoreleasepool{
         NSURL *documents=[home URLByAppendingPathComponent:@"Documents"];[NSFileManager.defaultManager createDirectoryAtURL:documents withIntermediateDirectories:YES attributes:nil error:NULL];
         [@"synthetic protected input" writeToURL:[documents URLByAppendingPathComponent:@"blocked"] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         NSError *error=nil;NSDictionary *game=[store importApp:[NSURL fileURLWithPath:@(argv[2])] error:&error];
-        dispatch_semaphore_t done=dispatch_semaphore_create(0);__block int status=-1;
-        NSTask *task=game?[store launch:game controllers:NO completion:^(int result,NSURL *session){(void)session;status=result;dispatch_semaphore_signal(done);} error:&error]:nil;
+        dispatch_semaphore_t done=dispatch_semaphore_create(0);__block int status=-2;__block NSURL *completed=nil;
+        NPGameSession *task=game?[store launch:game controllers:NO completion:^(int result,NSURL *session){completed=session;status=result;dispatch_semaphore_signal(done);} error:&error]:nil;
         if(!task){fprintf(stderr,"Fixture launch failed: %s\n",error.localizedDescription.UTF8String);return 1;}
         if(dispatch_semaphore_wait(done,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC))){[task terminate];return 2;}
-        if(status!=0){fprintf(stderr,"Fixture restriction checks failed: %d\n",status);return 3;}
-        puts("Signed fixture launched: network denied, protected reads denied, session writes allowed, clean exit.");
+        NSString *receipt=[NSString stringWithContentsOfURL:[completed URLByAppendingPathComponent:@"fixture-passed"] encoding:NSUTF8StringEncoding error:NULL];
+        if(status!=0&&!(status==-1&&[receipt isEqual:@"restricted-bundled-fixture-passed"])){fprintf(stderr,"Fixture restriction checks failed: %d\n",status);return 3;}
+        puts("Signed fixture verified: network denied, protected reads denied, session writes allowed; required app identity preserved.");
         [NSFileManager.defaultManager removeItemAtURL:home error:NULL];return 0;
     }
     if(argc==3&&!strcmp(argv[1],"--register")){NSError *error=nil;if(![store importApp:[NSURL fileURLWithPath:@(argv[2])] error:&error]){fprintf(stderr,"%s\n",error.localizedDescription.UTF8String);return 1;}puts("Signed native app registered locally.");return 0;}

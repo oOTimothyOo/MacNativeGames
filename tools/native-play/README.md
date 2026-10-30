@@ -40,18 +40,26 @@ A compatible signed bundle provides `Contents/Resources/game/build-info.json` wi
 ```json
 {
   "host_executable": "Contents/MacOS/GameHost",
-  "native_play": { "adapter": "dmhost-v2", "managed_state": true },
+  "native_play": {
+    "adapter": "dmhost-v2",
+    "managed_state": true,
+    "sandbox_entry": "sandbox-exec-v1"
+  },
   "controller_setup": true
 }
 ```
 
 The primary executable comes from `Info.plist`'s `CFBundleExecutable`. It must honor the supplied `DM_STATE_DIR`, `DM_SAVE` and `DM_TEMP` without redirecting writes into another title's state. The runtime location is allowlisted to `Contents/MacOS/GameHost` or the legacy `Contents/Resources/game/dmhost`. Jamboree's previous layout remains supported. `controller_setup` is optional and must only be declared when `DM_CONTROLLER_SETUP` is implemented. The example is an adapter contract, not evidence that another game is playable.
 
+`sandbox_entry` is optional and declares an additional launch contract: the primary executable accepts `DM_NATIVE_PLAY_POLICY`, checks that it names a private regular file owned by the current user, then replaces itself with `/usr/bin/sandbox-exec -f <policy> <runtime> …`. If applying that policy fails, the game must not start. This permits a normal Launch Services app launch while retaining the restriction profile. Native Play validates the policy with its harmless helper before starting the app. Ports without this explicit capability keep the direct restricted child-process path.
+
 ## macOS Game Mode
 
-New Jamboree packages declare Apple's `LSSupportsGameMode` flag and keep the actual runtime in `Contents/MacOS/GameHost`. The C entry point hands off to that runtime while retaining the bundle identity that AppKit and macOS use. Game resources remain in `Contents/Resources/game/`; moving the unchanged runtime requires no shader rebuild.
+New Jamboree packages declare Apple's `LSSupportsGameMode` flag and keep the actual runtime in `Contents/MacOS/GameHost`. Native Play opens this compatible package through Launch Services, and its C entry point applies the restriction profile before starting the runtime. Both the PID and macOS app association are retained across the handoff. A direct sandboxed process launch can leave the Launch Services bundle identifier unset even when Foundation finds the bundle. Game resources remain in `Contents/Resources/game/`; moving the unchanged runtime requires no shader rebuild.
 
 Start the game in native macOS full screen, then use Command-Esc to open the Game Overlay on macOS 26 and check Game Mode. macOS controls activation and remembers a per-game disabled preference; a bundle flag alone does not establish that Game Mode is active. See [Apple's Game Mode instructions](https://support.apple.com/en-euro/105118) and [the bundle flag documentation](https://developer.apple.com/documentation/bundleresources/information-property-list/lssupportsgamemode). The library itself is a utility and does not request Game Mode.
+
+Launch Services reports when its app terminates but does not provide this launcher with the game's exit status. Those session records use `status: -1` and `exit_status_known: false`; they must not be interpreted as either a confirmed clean exit or a crash. Direct child launches still record their actual exit status. Process-exit notifications finish recordings without background polling or an additional persistent helper.
 
 Snapshots include `save/`, `save.work/` and `controller-layout.txt`; SHA-256 hashes are verified. Only the most recent 20 valid completed snapshots are retained. Invalid or incomplete entries are not automatically deleted. Backup and restore refuse a running game, linked state paths, invalid manifests, corrupt files and data exceeding this adapter's limit.
 
@@ -71,6 +79,6 @@ python3 tools/native-play/test.py \
   --app "$HOME/Applications/Native Play.app"
 ```
 
-Tests cover multi-app import and independent identity checks, isolated progress/preferences, cross-game restore rejection, non-destructive removal, save/prefs round trips, corruption, links/traversal, mid-restore failure/rollback, retention, running-game guards, unsigned bundles, safe launch defaults, numeric timing calculations, and native hit areas. Signed synthetic apps exercise both runtime layouts under the real sandbox. UI checks render three synthetic catalog entries at three window sizes; no gameplay is captured. Jamboree's packaging suite additionally compiles a content-free runtime and checks its bundle identity and managed state after the real C launcher hands off.
+Tests cover multi-app import and independent identity checks, isolated progress/preferences, cross-game restore rejection, non-destructive removal, save/prefs round trips, corruption, links/traversal, mid-restore failure/rollback, retention, running-game guards, unsigned bundles, safe launch defaults, numeric timing calculations, and native hit areas. Signed synthetic apps exercise both runtime layouts under the real sandbox. A third fixture exercises Launch Services, the actual Jamboree C entry point and the restriction tool together; it verifies its running bundle identity and writes a success receipt only after the file/network restrictions pass. UI checks render three synthetic catalog entries at three window sizes; no gameplay is captured. Jamboree's packaging suite additionally checks managed state, language and rejection of a public policy file after the real C launcher hands off.
 
 The native game fixes and upstream attribution are recorded in [Jamboree's improvement notes](../../games/jamboree/docs/macos-improvements.md). Game builds, Metal compatibility and two-controller gameplay still require local hardware acceptance.

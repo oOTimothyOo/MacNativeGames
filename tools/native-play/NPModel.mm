@@ -1,4 +1,5 @@
 #import "NPModel.h"
+#import <AppKit/AppKit.h>
 #import <CommonCrypto/CommonDigest.h>
 #include <sys/stat.h>
 #include <math.h>
@@ -166,9 +167,21 @@ static NSDictionary *Files(NSURL *root, NSError **error) {
     return files;
 }
 
+@interface NPGameSession ()
+@property NSTask *child;
+@property NSRunningApplication *application;
+@property dispatch_source_t exitSource;
+@property BOOL ended;
+@end
+@implementation NPGameSession
+- (BOOL)isRunning {return !self.ended&&(self.child?self.child.running:!self.application.terminated);}
+- (int)processIdentifier {return self.child?self.child.processIdentifier:self.application.processIdentifier;}
+- (void)terminate {if(self.child)[self.child terminate];else[self.application terminate];}
+@end
+
 @interface NPStore ()
 @property NSURL *root, *home;
-- (nullable NSTask *)launchScoped:(NSDictionary *)game controllers:(BOOL)controllers completion:(void (^)(int,NSURL *))completion error:(NSError **)error;
+- (nullable NPGameSession *)launchScoped:(NSDictionary *)game controllers:(BOOL)controllers completion:(void (^)(int,NSURL *))completion error:(NSError **)error;
 @end
 @implementation NPStore
 - (instancetype)initWithRoot:(NSURL *)root home:(NSURL *)home {
@@ -231,6 +244,7 @@ static NSDictionary *Files(NSURL *root, NSError **error) {
              @"host_sha256":info[@"host_sha256"],@"bundle_cdhash":cdhash,@"version":version,
              @"chain":info[@"chain"]?:@"unknown",@"language":info[@"language"]?:@"en-US",@"executable":entrypoint,
              @"executable_sha256":NPSHA256(Child(app,entrypoint)),@"host_executable":hostPath,@"adapter":@"dmhost",@"game_mode_supported":@([plist[@"LSSupportsGameMode"] boolValue]),
+             @"launch_services_sandbox":@([info[@"native_play"] isKindOfClass:NSDictionary.class]&&[info[@"native_play"][@"sandbox_entry"] isEqual:@"sandbox-exec-v1"]),
              @"controllers":@([info[@"game"][@"title_id"] isEqual:@"0100965017338000"]||[info[@"controller_setup"] boolValue])};
 }
 - (NSDictionary *)importApp:(NSURL *)app error:(NSError **)error {
@@ -250,7 +264,7 @@ static NSDictionary *Files(NSURL *root, NSError **error) {
 - (BOOL)verifyGame:(NSDictionary *)game error:(NSError **)error {
     if (![game[@"path"] isKindOfClass:NSString.class]) return Fail(error,@"Choose an installed native app.");
     NSDictionary *actual=[self validatedApp:[NSURL fileURLWithPath:game[@"path"]] error:error]; if (!actual) return NO;
-    for(NSString *key in @[@"id",@"path",@"host_sha256",@"bundle_cdhash",@"executable",@"executable_sha256",@"host_executable"])
+    for(NSString *key in @[@"id",@"path",@"host_sha256",@"bundle_cdhash",@"executable",@"executable_sha256",@"host_executable",@"launch_services_sandbox"])
         if(game[key]&&![game[key] isEqual:actual[key]])return Fail(error,@"This app changed since it was added. Add the updated build again to review its identity.");
     return YES;
 }
@@ -373,11 +387,11 @@ static NSDictionary *Files(NSURL *root, NSError **error) {
     if([self.options[@"record"] boolValue]){environment[@"DM_NVN_TSV"]=Child(session,@"frames.tsv").path;environment[@"DM_NVN_TSV_CALLS"]=@"0";}
     return environment;
 }
-- (NSTask *)launch:(NSDictionary *)game controllers:(BOOL)controllers completion:(void (^)(int,NSURL *))completion error:(NSError **)error {
+- (NPGameSession *)launch:(NSDictionary *)game controllers:(BOOL)controllers completion:(void (^)(int,NSURL *))completion error:(NSError **)error {
     NPStore *scoped=[[[self class] alloc]initWithRoot:self.root home:self.home];scoped.activeGame=game;
     return [scoped launchScoped:game controllers:controllers completion:completion error:error];
 }
-- (NSTask *)launchScoped:(NSDictionary *)game controllers:(BOOL)controllers completion:(void (^)(int,NSURL *))completion error:(NSError **)error {
+- (NPGameSession *)launchScoped:(NSDictionary *)game controllers:(BOOL)controllers completion:(void (^)(int,NSURL *))completion error:(NSError **)error {
     if([self gameIsRunning]){Fail(error,@"The game is already running. Return to it and press F2 for controllers.");return nil;}
     if(![self verifyGame:game error:error]||![self backup:@"Before play" error:error])return nil;
     if([self gameIsRunning]){Fail(error,@"Another game session started. Close it before launching again.");return nil;}
@@ -389,18 +403,40 @@ static NSDictionary *Files(NSURL *root, NSError **error) {
     // The same signed executable probes restrictions without reading a private file
     // or making an outbound connection (only a denied loopback socket attempt).
     if(!Command(@"/usr/bin/sandbox-exec",@[@"-f",profile.path,NSBundle.mainBundle.executablePath,@"--sandbox-probe",Child(self.root,@"probe-denied").path,Child(session,@"probe-allowed").path,Child(self.home,@".native-play-denied-write").path],nil,error))return nil;
+    BOOL workspace=[game[@"launch_services_sandbox"] boolValue];
+    NSMutableDictionary *environment=[[self environmentForSession:session controllers:controllers] mutableCopy];
+    if(workspace)environment[@"DM_NATIVE_PLAY_POLICY"]=profile.path;
+    BOOL recording=environment[@"DM_NVN_TSV"]!=nil,hud=environment[@"MTL_HUD_ENABLED"]!=nil;
+    WriteJSON(@{@"game":game[@"id"],@"app_key":[self keyForGame:game],@"started":@(NSDate.date.timeIntervalSince1970),@"network_denied":@YES,@"hud":@(hud),@"record":@(recording),@"launch_services":@(workspace)},Child(session,@"session.json"),nil);
+    void (^finished)(int)=^(int status){NPProfileSummary(session);WriteJSON(@{@"status":@(status),@"exit_status_known":@(status!=-1),@"finished":@(NSDate.date.timeIntervalSince1970)},Child(session,@"result.json"),nil);NPPruneSessions(self.root);completion(status,session);};
+    NPGameSession *handle=[NPGameSession new];
+    if(workspace){
+        NSWorkspaceOpenConfiguration *configuration=NSWorkspaceOpenConfiguration.configuration;
+        configuration.environment=environment;configuration.createsNewApplicationInstance=YES;configuration.allowsRunningApplicationSubstitution=NO;
+        dispatch_semaphore_t opened=dispatch_semaphore_create(0);NSObject *gate=[NSObject new];__block BOOL expired=NO;__block NSError *launchError=nil;__block NSRunningApplication *application=nil;
+        [NSWorkspace.sharedWorkspace openApplicationAtURL:[NSURL fileURLWithPath:game[@"path"]] configuration:configuration completionHandler:^(NSRunningApplication *app,NSError *failure){@synchronized(gate){if(expired){[app terminate];}else{application=app;launchError=failure;}}dispatch_semaphore_signal(opened);}];
+        if(dispatch_semaphore_wait(opened,dispatch_time(DISPATCH_TIME_NOW,30*NSEC_PER_SEC))){@synchronized(gate){expired=YES;[application terminate];}Fail(error,@"macOS did not finish opening the game. The launch was stopped.");WriteJSON(@{@"status":@127,@"exit_status_known":@YES,@"finished":@(NSDate.date.timeIntervalSince1970)},Child(session,@"result.json"),nil);return nil;}
+        if(!application){if(error)*error=launchError;WriteJSON(@{@"status":@127,@"exit_status_known":@YES,@"finished":@(NSDate.date.timeIntervalSince1970)},Child(session,@"result.json"),nil);return nil;}
+        handle.application=application;
+        dispatch_source_t source=dispatch_source_create(DISPATCH_SOURCE_TYPE_PROC,(uintptr_t)application.processIdentifier,DISPATCH_PROC_EXIT,dispatch_get_global_queue(QOS_CLASS_UTILITY,0));
+        if(!source){[application terminate];Fail(error,@"Could not monitor the game; the launch was stopped.");return nil;}
+        handle.exitSource=source;
+        dispatch_source_set_event_handler(source,^{handle.ended=YES;dispatch_source_cancel(handle.exitSource);finished(-1);});
+        dispatch_source_set_cancel_handler(source,^{handle.exitSource=nil;});
+        dispatch_resume(source);
+    }else{
     NSTask *task=[NSTask new];task.executableURL=[NSURL fileURLWithPath:@"/usr/bin/sandbox-exec"];
     NSDictionary *launchInfo=[NSDictionary dictionaryWithContentsOfURL:Child([NSURL fileURLWithPath:game[@"path"]],@"Contents/Info.plist")];
     NSString *entry=game[@"executable"]?:[@"Contents/MacOS/" stringByAppendingString:launchInfo[@"CFBundleExecutable"]];
     task.arguments=@[@"-f",profile.path,[game[@"path"] stringByAppendingPathComponent:entry]];
-    task.environment=[self environmentForSession:session controllers:controllers];task.currentDirectoryURL=self.state;
-    BOOL recording=task.environment[@"DM_NVN_TSV"]!=nil,hud=task.environment[@"MTL_HUD_ENABLED"]!=nil;
+    task.environment=environment;task.currentDirectoryURL=self.state;
     [FM() createFileAtPath:Child(session,@"launcher.log").path contents:nil attributes:@{NSFilePosixPermissions:@0600}];
     NSFileHandle *log=[NSFileHandle fileHandleForWritingAtPath:Child(session,@"launcher.log").path];task.standardOutput=log;task.standardError=log;
-    task.terminationHandler=^(NSTask *finished){[log closeFile];NPProfileSummary(session);WriteJSON(@{@"status":@(finished.terminationStatus),@"finished":@(NSDate.date.timeIntervalSince1970)},Child(session,@"result.json"),nil);NPPruneSessions(self.root);completion(finished.terminationStatus,session);};
+    task.terminationHandler=^(NSTask *child){[log closeFile];finished(child.terminationStatus);};
     if(![task launchAndReturnError:error])return nil;
-    WriteJSON(@{@"game":game[@"id"],@"app_key":[self keyForGame:game],@"started":@(NSDate.date.timeIntervalSince1970),@"network_denied":@YES,@"hud":@(hud),@"record":@(recording)},Child(session,@"session.json"),nil);
+    handle.child=task;
+    }
     if(recording){NSMutableDictionary *options=[self.options mutableCopy];options[@"record"]=@NO;[self setOptions:options];}
-    return task;
+    return handle;
 }
 @end

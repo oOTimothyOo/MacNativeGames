@@ -42,7 +42,7 @@ subprocess.run(['iconutil', '-c', 'icns', str(iconset), '-o', str(resources / 'N
 with (partial / 'Contents/Info.plist').open('wb') as stream:
     plistlib.dump({'CFBundleExecutable': 'NativePlay', 'CFBundleIdentifier': 'org.macnativegames.native-play',
         'CFBundleName': 'Native Play', 'CFBundleDisplayName': 'Native Play',
-        'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': '0.2.0', 'CFBundleVersion': '2',
+        'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': '0.2.1', 'CFBundleVersion': '3',
         'CFBundleIconFile': 'NativePlay', 'LSMinimumSystemVersion': '26.0', 'NSHighResolutionCapable': True,
         'LSApplicationCategoryType': 'public.app-category.utilities', 'LSSupportsGameMode': False,
         'GCSupportsGameMode': False}, stream)

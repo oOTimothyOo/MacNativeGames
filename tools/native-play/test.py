@@ -23,25 +23,35 @@ binary = work / 'backend-tests'
 subprocess.run(['clang++', '-std=c++20', '-arch', 'arm64', '-mmacosx-version-min=26.0', '-fobjc-arc',
     '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-Wno-deprecated-declarations',
     '-fsanitize=undefined', '-fno-sanitize-recover=all', str(ROOT / 'tests.mm'), str(ROOT / 'NPModel.mm'),
-    '-framework', 'Foundation', '-o', str(binary)], check=True)
+    '-framework', 'Cocoa', '-o', str(binary)], check=True)
 subprocess.run([str(binary), str(work / 'synthetic-state')], check=True, timeout=60)
 if args.app:
     for name, identifier, entry, host_path in (
         ('Legacy', '0100965017338000', 'Jamboree', 'Contents/Resources/game/dmhost'),
         ('Managed', '0100000000000001', 'Fixture', 'Contents/MacOS/GameHost'),
+        ('LaunchServices', '0100000000000002', 'Jamboree', 'Contents/MacOS/GameHost'),
     ):
         fixture = work / f'{name}.app'
         executable = fixture / f'Contents/MacOS/{entry}'
         game, host = fixture / 'Contents/Resources/game', fixture / host_path
         executable.parent.mkdir(parents=True)
         game.mkdir(parents=True)
-        subprocess.run(['clang', '-arch', 'arm64', '-mmacosx-version-min=26.0', '-O2', '-Wall', '-Wextra',
-                        '-Werror', str(ROOT / 'fixture.c'), '-o', str(executable)], check=True)
-        shutil.copy2(executable, host)
+        if name == 'LaunchServices':
+            subprocess.run(['clang', '-arch', 'arm64', '-mmacosx-version-min=26.0', '-O2', '-Wall', '-Wextra',
+                            '-Werror', str(ROOT.parents[1] / 'games/jamboree/app/launcher.c'), '-o', str(executable)], check=True)
+            subprocess.run(['clang++', '-arch', 'arm64', '-mmacosx-version-min=26.0', '-fobjc-arc', '-O2', '-Wall', '-Wextra',
+                            '-Werror', str(ROOT / 'managed_fixture.mm'), '-framework', 'Cocoa', '-o', str(host)], check=True)
+        else:
+            subprocess.run(['clang', '-arch', 'arm64', '-mmacosx-version-min=26.0', '-O2', '-Wall', '-Wextra',
+                            '-Werror', str(ROOT / 'fixture.c'), '-o', str(executable)], check=True)
+            shutil.copy2(executable, host)
         subprocess.run(['codesign', '--force', '--sign', '-', str(host)], check=True)
+        adapter = {'adapter': 'dmhost-v2', 'managed_state': True}
+        if name == 'LaunchServices':
+            adapter['sandbox_entry'] = 'sandbox-exec-v1'
         (game / 'build-info.json').write_text(json.dumps({'game': {'title_id': identifier, 'version': 'synthetic'},
             'host_sha256': hashlib.sha256(host.read_bytes()).hexdigest(), 'host_executable': host_path,
-            'native_play': {'adapter': 'dmhost-v2', 'managed_state': True}, 'chain': 'synthetic', 'language': 'en-US'}))
+            'native_play': adapter, 'chain': 'synthetic', 'language': 'en-US'}))
         with (fixture / 'Contents/Info.plist').open('wb') as stream:
             plistlib.dump({'CFBundleExecutable': entry, 'CFBundleIdentifier': f'org.macnativegames.fixture.{name.lower()}',
                           'CFBundlePackageType': 'APPL', 'LSMinimumSystemVersion': '26.0'}, stream)

@@ -85,6 +85,24 @@ int main(void) {
     join(host, sizeof host, app, "MacOS/GameHost");
     join(patched, sizeof patched, game, "patched");
     if (chdir(run)) { perror("chdir"); return 1; }
+    const char *policy = getenv("DM_NATIVE_PLAY_POLICY");
+    if (policy) {
+        struct stat policy_info;
+        int policy_fd = open(policy, O_RDONLY | O_NOFOLLOW);
+        if (*policy != '/' || policy_fd < 0 || fstat(policy_fd, &policy_info) ||
+            !S_ISREG(policy_info.st_mode) || policy_info.st_uid != geteuid() ||
+            (policy_info.st_mode & 0077) || policy_info.st_size <= 0 || policy_info.st_size > 65536) {
+            if (policy_fd >= 0) close(policy_fd);
+            fputs("Invalid private launch policy; game was not started.\n", stderr);
+            return 1;
+        }
+        close(policy_fd);
+        // Launch Services owns this process's app identity. The restriction tool
+        // and game replace it in place, retaining the PID and app association.
+        execl("/usr/bin/sandbox-exec", "sandbox-exec", "-f", policy, host, patched, (char *)NULL);
+        perror("apply private launch policy");
+        return 1;
+    }
     execl(host, host, patched, (char *)NULL);
     perror("launch dmhost");
     return 1;

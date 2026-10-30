@@ -49,4 +49,6 @@ The app declares `LSSupportsGameMode` and `GCSupportsGameMode`. Its C launcher n
 
 A synthetic packaging test builds the actual launcher and a Foundation probe, verifies the signed bundle, and checks bundle identity, save/temp paths, language and linked-state rejection. Game Mode still requires native macOS full screen and an enabled per-game preference; packaging checks do not prove that the OS has activated it.
 
+The managed launcher also supports a private `DM_NATIVE_PLAY_POLICY` file. Native Play uses Launch Services to establish the game identity, then the C entry point executes the system restriction tool before the engine. A content-free integration test verifies that the running bundle identity survives this path while networking and protected-file access remain denied. No global security setting is changed.
+
 The [Native Play launcher](../../../tools/native-play/README.md) adds a multi-app Cocoa library, per-app launch preferences and per-title recovery controls without embedding game content.

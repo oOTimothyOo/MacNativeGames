@@ -157,7 +157,7 @@ def package(source, build, output, language):
         report = {'game': pins, 'chain': chain, 'shader_inputs': inputs, 'language': language,
                   'host_sha256': hashlib.sha256((macos / 'GameHost').read_bytes()).hexdigest(),
                   'host_executable': 'Contents/MacOS/GameHost',
-                  'native_play': {'adapter': 'dmhost-v2', 'managed_state': True}, 'controller_setup': True,
+                  'native_play': {'adapter': 'dmhost-v2', 'managed_state': True, 'sandbox_entry': 'sandbox-exec-v1'}, 'controller_setup': True,
                   'rewrite_rules': (build / 'patched_v458752/build_src.sha256').read_text()}
         (resources / 'build-info.json').write_text(json.dumps(report, indent=2) + '\n')
         # Sign nested Mach-O files explicitly, then the bundle, without touching game data.
