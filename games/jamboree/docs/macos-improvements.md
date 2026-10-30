@@ -43,4 +43,10 @@ python3 games/jamboree/scripts/test_movie.py --work-dir /private/path/movie-test
 python3 games/jamboree/scripts/test_gpu.py --work-dir /private/path/gpu-tests
 ```
 
-The [Native Play launcher](../../../tools/native-play/README.md) adds a Cocoa library and recovery controls without embedding or changing the game.
+## Game Mode packaging
+
+The app declares `LSSupportsGameMode` and `GCSupportsGameMode`. Its C launcher now executes `Contents/MacOS/GameHost`, preserving the main bundle identity after `exec`; keeping the runtime under Resources made Foundation report it as an unbundled executable. Resources and shaders stay in `Contents/Resources/game/`. The launcher accepts a private absolute `DM_STATE_DIR` for managed library launches, retaining the existing Application Support path by default.
+
+A synthetic packaging test builds the actual launcher and a Foundation probe, verifies the signed bundle, and checks bundle identity, save/temp paths, language and linked-state rejection. Game Mode still requires native macOS full screen and an enabled per-game preference; packaging checks do not prove that the OS has activated it.
+
+The [Native Play launcher](../../../tools/native-play/README.md) adds a multi-app Cocoa library, per-app launch preferences and per-title recovery controls without embedding game content.

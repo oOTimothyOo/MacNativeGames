@@ -27,7 +27,7 @@ resources.mkdir(mode=0o700)
 work.mkdir(parents=True, exist_ok=True, mode=0o700)
 subprocess.run(['clang++', '-std=c++20', '-arch', 'arm64', '-mmacosx-version-min=26.0',
     '-fobjc-arc', '-O2', '-Wall', '-Wextra', '-Werror', '-Wno-deprecated-declarations',
-    str(ROOT / 'main.mm'), str(ROOT / 'NPModel.mm'), '-framework', 'Cocoa',
+    str(ROOT / 'main.mm'), str(ROOT / 'NPApp.mm'), str(ROOT / 'NPModel.mm'), '-framework', 'Cocoa',
     '-framework', 'UniformTypeIdentifiers', '-o', str(macos / 'NativePlay')], check=True)
 icon = work / 'icon.png'
 subprocess.run([str(macos / 'NativePlay'), '--render-icon', str(icon)], check=True)
@@ -42,9 +42,10 @@ subprocess.run(['iconutil', '-c', 'icns', str(iconset), '-o', str(resources / 'N
 with (partial / 'Contents/Info.plist').open('wb') as stream:
     plistlib.dump({'CFBundleExecutable': 'NativePlay', 'CFBundleIdentifier': 'org.macnativegames.native-play',
         'CFBundleName': 'Native Play', 'CFBundleDisplayName': 'Native Play',
-        'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': '0.1.0', 'CFBundleVersion': '1',
+        'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': '0.2.0', 'CFBundleVersion': '2',
         'CFBundleIconFile': 'NativePlay', 'LSMinimumSystemVersion': '26.0', 'NSHighResolutionCapable': True,
-        'LSApplicationCategoryType': 'public.app-category.games'}, stream)
+        'LSApplicationCategoryType': 'public.app-category.utilities', 'LSSupportsGameMode': False,
+        'GCSupportsGameMode': False}, stream)
 subprocess.run(['codesign', '--force', '--sign', '-', str(partial)], check=True)
 subprocess.run(['codesign', '--verify', '--deep', '--strict', str(partial)], check=True)
 partial.rename(output)

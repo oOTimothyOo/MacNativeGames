@@ -2,6 +2,8 @@
 import importlib.util
 import json
 import os
+import platform
+import plistlib
 from pathlib import Path
 import shutil
 import subprocess
@@ -16,6 +18,53 @@ import build_jamboree as build
 
 
 class BuildTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'darwin' and platform.machine() == 'arm64', 'Apple Silicon packaging test')
+    def test_packaged_runtime_keeps_bundle_identity_and_isolated_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            source, work = root / 'source', root / 'build'
+            profile = source / f'dm/games/{build.TITLE}'
+            chain_tool = source / 'dm/gfx/tools/dmsh_chain.py'
+            chain_tool.parent.mkdir(parents=True)
+            chain_tool.write_text('import sys\nprint("fixture-inputs" if "--inputs" in sys.argv else "fixture-chain")\n')
+            profile.mkdir(parents=True)
+            for name in ('c1_full.tsv', 'cb_extent.tsv'):
+                (profile / name).write_text('# chain b-fixture-chain inputs fixture-inputs synthetic\n')
+            for name in ('tools', 'patched_v458752', 'font', 'extract/v458752/RomFS', 'shader/cache/b-fixture-chain'):
+                (work / name).mkdir(parents=True)
+            (work / 'patched_v458752/build_src.sha256').write_text('synthetic rules\n')
+            (work / 'font/nintendo_ext.ttf').write_bytes(b'synthetic font')
+            (work / 'shader/cache/b-fixture-chain/inputs.tsv').write_text(f'game\t{build.TITLE}\ninputs\tfixture-inputs\n')
+            subprocess.run(['clang++', '-arch', 'arm64', '-mmacosx-version-min=26.0', '-fobjc-arc',
+                            '-Wall', '-Wextra', '-Werror', str(GAME / 'tests/bundle_identity.mm'),
+                            '-framework', 'Foundation', '-o', str(work / 'tools/dmhost')], check=True)
+            app = root / 'Identity.app'
+            with mock.patch.object(build, 'verify_originals', return_value={'title_id': build.TITLE}):
+                build.package(source, work, app, 'en-US')
+            info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+            self.assertTrue(info['LSSupportsGameMode'])
+            self.assertTrue(info['GCSupportsGameMode'])
+            provenance = json.loads((app / 'Contents/Resources/game/build-info.json').read_text())
+            self.assertEqual(provenance['host_executable'], 'Contents/MacOS/GameHost')
+            self.assertTrue(provenance['native_play']['managed_state'])
+            self.assertFalse((app / 'Contents/Resources/game/dmhost').exists())
+            state = root / 'managed-state'
+            env = dict(os.environ, DM_STATE_DIR=str(state))
+            subprocess.run([str(app / 'Contents/MacOS/Jamboree')], env=env, check=True)
+            report = json.loads((state / 'identity.json').read_text())
+            self.assertEqual(report['bundle_id'], info['CFBundleIdentifier'])
+            self.assertEqual(Path(report['bundle_path']), app)
+            self.assertEqual(Path(report['save']), state / 'save')
+            self.assertEqual(Path(report['temporary']), state / 'temp')
+            self.assertEqual(Path(report['patched']), app / 'Contents/Resources/game/patched')
+            self.assertEqual(report['language'], 'en-US')
+            self.assertEqual(state.stat().st_mode & 0o777, 0o700)
+            linked = root / 'linked-state'
+            linked.symlink_to(state, target_is_directory=True)
+            rejected = subprocess.run([str(app / 'Contents/MacOS/Jamboree')],
+                                      env=dict(env, DM_STATE_DIR=str(linked)), capture_output=True)
+            self.assertNotEqual(rejected.returncode, 0)
+
     def test_tooling_checksums(self):
         build.verify_prebuilt()
 

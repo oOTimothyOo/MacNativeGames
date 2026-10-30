@@ -10,7 +10,9 @@
 #include <unistd.h>
 
 static void make_dir(const char *path) {
-    if (!mkdir(path, 0755) || errno == EEXIST) return;
+    struct stat st;
+    if (!mkdir(path, 0700)) return;
+    if (errno == EEXIST && !lstat(path, &st) && S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) return;
     fprintf(stderr, "mkdir %s: %s\n", path, strerror(errno));
     exit(1);
 }
@@ -23,6 +25,7 @@ static void join(char *out, size_t n, const char *base, const char *name) {
 }
 
 int main(void) {
+    umask(0077);
     char exe[PATH_MAX], app[PATH_MAX], game[PATH_MAX], run[PATH_MAX], save[PATH_MAX], temp[PATH_MAX], log[PATH_MAX];
     uint32_t n = sizeof exe;
     if (_NSGetExecutablePath(exe, &n) || !realpath(exe, app)) {
@@ -38,13 +41,17 @@ int main(void) {
     // and writing them inside Resources would invalidate the bundle signature.
     const char *home = getenv("HOME");
     if (!home) return 1;
-    join(run, sizeof run, home, "Library/Application Support/Super Mario Party Jamboree");
+    const char *state_override = getenv("DM_STATE_DIR");
+    if (state_override && *state_override) {
+        if (*state_override != '/' || strlen(state_override) >= sizeof run) return 1;
+        strcpy(run, state_override);
+    } else join(run, sizeof run, home, "Library/Application Support/Super Mario Party Jamboree");
     join(save, sizeof save, run, "save");
     join(temp, sizeof temp, run, "temp");
     join(log, sizeof log, run, "last-launch.log");
 
     make_dir(run); make_dir(save); make_dir(temp);
-    int fd = open(log, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    int fd = open(log, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, 0600);
     if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); if (fd > 2) close(fd); }
 
     setenv("DM_ROOT", game, 1);
@@ -72,7 +79,10 @@ int main(void) {
     setenv("DM_AUDIO", "1", 1);
 
     char host[PATH_MAX], patched[PATH_MAX];
-    join(host, sizeof host, game, "dmhost");
+    // Keeping the runtime in Contents/MacOS preserves the app's NSBundle identity
+    // after exec. Resources/game made AppKit treat the process as an unbundled CLI,
+    // preventing the OS from associating full-screen gameplay with Game Mode.
+    join(host, sizeof host, app, "MacOS/GameHost");
     join(patched, sizeof patched, game, "patched");
     if (chdir(run)) { perror("chdir"); return 1; }
     execl(host, host, patched, (char *)NULL);

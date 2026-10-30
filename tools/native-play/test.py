@@ -26,21 +26,26 @@ subprocess.run(['clang++', '-std=c++20', '-arch', 'arm64', '-mmacosx-version-min
     '-framework', 'Foundation', '-o', str(binary)], check=True)
 subprocess.run([str(binary), str(work / 'synthetic-state')], check=True, timeout=60)
 if args.app:
-    fixture = work / 'Synthetic.app'
-    executable = fixture / 'Contents/MacOS/Jamboree'
-    game = fixture / 'Contents/Resources/game'
-    executable.parent.mkdir(parents=True)
-    game.mkdir(parents=True)
-    subprocess.run(['clang', '-arch', 'arm64', '-mmacosx-version-min=26.0', '-O2', '-Wall', '-Wextra',
-                    '-Werror', str(ROOT / 'fixture.c'), '-o', str(executable)], check=True)
-    shutil.copy2(executable, game / 'dmhost')
-    subprocess.run(['codesign', '--force', '--sign', '-', str(game / 'dmhost')], check=True)
-    (game / 'build-info.json').write_text(json.dumps({'game': {'title_id': '0100965017338000', 'version': 'synthetic'},
-        'host_sha256': hashlib.sha256((game / 'dmhost').read_bytes()).hexdigest(), 'chain': 'synthetic', 'language': 'en-US'}))
-    with (fixture / 'Contents/Info.plist').open('wb') as stream:
-        plistlib.dump({'CFBundleExecutable': 'Jamboree', 'CFBundleIdentifier': 'org.macnativegames.native-play.fixture',
-                      'CFBundlePackageType': 'APPL', 'LSMinimumSystemVersion': '26.0'}, stream)
-    subprocess.run(['codesign', '--force', '--sign', '-', str(fixture)], check=True)
-    subprocess.run([str(args.app / 'Contents/MacOS/NativePlay'), '--launch-check', str(fixture)], check=True, timeout=30)
+    for name, identifier, entry, host_path in (
+        ('Legacy', '0100965017338000', 'Jamboree', 'Contents/Resources/game/dmhost'),
+        ('Managed', '0100000000000001', 'Fixture', 'Contents/MacOS/GameHost'),
+    ):
+        fixture = work / f'{name}.app'
+        executable = fixture / f'Contents/MacOS/{entry}'
+        game, host = fixture / 'Contents/Resources/game', fixture / host_path
+        executable.parent.mkdir(parents=True)
+        game.mkdir(parents=True)
+        subprocess.run(['clang', '-arch', 'arm64', '-mmacosx-version-min=26.0', '-O2', '-Wall', '-Wextra',
+                        '-Werror', str(ROOT / 'fixture.c'), '-o', str(executable)], check=True)
+        shutil.copy2(executable, host)
+        subprocess.run(['codesign', '--force', '--sign', '-', str(host)], check=True)
+        (game / 'build-info.json').write_text(json.dumps({'game': {'title_id': identifier, 'version': 'synthetic'},
+            'host_sha256': hashlib.sha256(host.read_bytes()).hexdigest(), 'host_executable': host_path,
+            'native_play': {'adapter': 'dmhost-v2', 'managed_state': True}, 'chain': 'synthetic', 'language': 'en-US'}))
+        with (fixture / 'Contents/Info.plist').open('wb') as stream:
+            plistlib.dump({'CFBundleExecutable': entry, 'CFBundleIdentifier': f'org.macnativegames.fixture.{name.lower()}',
+                          'CFBundlePackageType': 'APPL', 'LSMinimumSystemVersion': '26.0'}, stream)
+        subprocess.run(['codesign', '--force', '--sign', '-', str(fixture)], check=True)
+        subprocess.run([str(args.app / 'Contents/MacOS/NativePlay'), '--launch-check', str(fixture)], check=True, timeout=30)
     subprocess.run([str(args.app / 'Contents/MacOS/NativePlay'), '--ui-test', '--ui-snapshot',
                     str(work / 'synthetic-library.png')], check=True, timeout=30)

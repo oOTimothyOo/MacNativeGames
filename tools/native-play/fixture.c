@@ -9,8 +9,11 @@
 
 int main(void) {
     char path[4096];
-    const char *home=getenv("HOME"),*temporary=getenv("TMPDIR");
-    if(!home||!temporary||getenv("DM_NVN_TSV")||getenv("MTL_DEBUG_LAYER"))return 1;
+    const char *home=getenv("HOME"),*temporary=getenv("TMPDIR"),*state=getenv("DM_STATE_DIR"),*save=getenv("DM_SAVE"),*game_temporary=getenv("DM_TEMP");
+    if(!home||!temporary||!state||!save||!game_temporary||getenv("DM_NVN_TSV")||getenv("MTL_DEBUG_LAYER"))return 1;
+    if(snprintf(path,sizeof path,"%s/save",state)>=(int)sizeof path||strcmp(path,save))return 9;
+    if(snprintf(path,sizeof path,"%s/temp",state)>=(int)sizeof path||strcmp(path,game_temporary))return 10;
+    if(!getenv("DM_FULLSCREEN")||strcmp(getenv("DM_FULLSCREEN"),"1"))return 11;
     if(snprintf(path,sizeof path,"%s/Documents/blocked",home)>=(int)sizeof path)return 2;
     FILE *file=fopen(path,"rb");if(file){fclose(file);return 3;}
     if(errno!=EPERM&&errno!=EACCES)return 4;

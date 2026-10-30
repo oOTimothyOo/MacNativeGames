@@ -16,6 +16,10 @@ static BOOL Directory(NSURL *url, NSError **error) {
     return [FM() createDirectoryAtURL:url withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions:@0700} error:error];
 }
 static BOOL Exists(NSURL *url) { return [FM() fileExistsAtPath:url.path]; }
+static BOOL TitleID(id value) {
+    if(![value isKindOfClass:NSString.class]||[value length]!=16)return NO;
+    return [value rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdefABCDEF"] invertedSet]].location==NSNotFound;
+}
 static NSString *RulePath(NSURL *url) {
     std::error_code error;auto resolved=std::filesystem::weakly_canonical(std::filesystem::path(url.fileSystemRepresentation),error);
     return error?url.path:@(resolved.c_str());
@@ -94,7 +98,7 @@ void NPPruneSessions(NSURL *root) {
     for(NSURL *url in [FM() contentsOfDirectoryAtURL:sessions includingPropertiesForKeys:nil options:0 error:nil]){
         if(![[NSUUID alloc]initWithUUIDString:url.lastPathComponent]||!NoLinks(url)||!NoLinks(Child(url,@"session.json"))||!NoLinks(Child(url,@"result.json")))continue;
         NSDictionary *session=JSON(Child(url,@"session.json")),*result=JSON(Child(url,@"result.json"));
-        if(![session isKindOfClass:NSDictionary.class]||![session[@"game"] isEqual:@"0100965017338000"]||![result isKindOfClass:NSDictionary.class]||![result[@"finished"] isKindOfClass:NSNumber.class])continue;
+        if(![session isKindOfClass:NSDictionary.class]||!TitleID(session[@"game"])||![result isKindOfClass:NSDictionary.class]||![result[@"finished"] isKindOfClass:NSNumber.class])continue;
         [completed addObject:@{@"url":url,@"finished":result[@"finished"]}];
     }
     [completed sortUsingComparator:^NSComparisonResult(NSDictionary *a,NSDictionary *b){return [b[@"finished"] compare:a[@"finished"]];}];
@@ -163,23 +167,32 @@ static NSDictionary *Files(NSURL *root, NSError **error) {
 }
 
 @interface NPStore ()
-@property NSURL *root, *home, *state;
+@property NSURL *root, *home;
+- (nullable NSTask *)launchScoped:(NSDictionary *)game controllers:(BOOL)controllers completion:(void (^)(int,NSURL *))completion error:(NSError **)error;
 @end
 @implementation NPStore
 - (instancetype)initWithRoot:(NSURL *)root home:(NSURL *)home {
     if ((self=[super init])) {
         if(!NoLinks(root)||!NoLinks(home))return nil;
         _root=[NSURL fileURLWithPath:RulePath(root)]; _home=[NSURL fileURLWithPath:RulePath(home)];
-        _state=Child(_home,@"Library/Application Support/Super Mario Party Jamboree");
-        if (!NoLinks(_root) || !NoLinks(_state) || !Directory(_root,nil)) return nil;
+        if (!NoLinks(_root) || !Directory(_root,nil)) return nil;
     } return self;
+}
+- (NSString *)activeID { return TitleID(self.activeGame[@"id"])?[self.activeGame[@"id"] lowercaseString]:@"0100965017338000"; }
+- (NSURL *)state {
+    return [self.activeID isEqual:@"0100965017338000"]?Child(self.home,@"Library/Application Support/Super Mario Party Jamboree"):Child(self.root,[@"GameData/" stringByAppendingString:self.activeID]);
+}
+- (NSString *)keyForGame:(NSDictionary *)game {
+    NSString *path=[game[@"path"] isKindOfClass:NSString.class]?game[@"path"]:@"legacy";
+    NSData *data=[path dataUsingEncoding:NSUTF8StringEncoding];unsigned char digest[CC_SHA256_DIGEST_LENGTH];CC_SHA256(data.bytes,(CC_LONG)data.length,digest);
+    NSMutableString *key=[NSMutableString new];for(NSUInteger i=0;i<sizeof digest;i++)[key appendFormat:@"%02x",digest[i]];return key;
 }
 - (NSArray<NSDictionary *> *)games {
     if(!NoLinks(Child(self.root,@"library.json")))return @[];
     id value=JSON(Child(self.root,@"library.json"));
     if(![value isKindOfClass:NSArray.class])return @[];
     NSMutableArray *valid=[NSMutableArray new];
-    for(id row in value)if([row isKindOfClass:NSDictionary.class]&&[row[@"id"] isEqual:@"0100965017338000"]&&
+    for(id row in value)if([row isKindOfClass:NSDictionary.class]&&TitleID(row[@"id"])&&
         [row[@"path"] isKindOfClass:NSString.class]&&[row[@"title"] isKindOfClass:NSString.class]&&[row[@"version"] isKindOfClass:NSString.class])[valid addObject:row];
     return valid;
 }
@@ -187,13 +200,21 @@ static NSDictionary *Files(NSURL *root, NSError **error) {
     if(!NoLinks(app)){Fail(error,@"Choose an app without linked parent directories.");return nil;}
     app=app.URLByStandardizingPath;
     if (![app.pathExtension isEqual:@"app"] || !NoLinks(app)) { Fail(error,@"Choose a local .app without symbolic-link parents.");return nil; }
-    if(!NoLinks(Child(app,@"Contents/Resources/game/build-info.json"))||!NoLinks(Child(app,@"Contents/MacOS/Jamboree"))){Fail(error,@"The app contains linked launch metadata.");return nil;}
+    NSDictionary *plist=[NSDictionary dictionaryWithContentsOfURL:Child(app,@"Contents/Info.plist")];
+    NSString *executable=plist[@"CFBundleExecutable"];
+    if(![executable isKindOfClass:NSString.class]||!executable.length||![executable.lastPathComponent isEqual:executable]||[executable isEqual:@"."]||[executable isEqual:@".."]) {Fail(error,@"The native app has an invalid executable name.");return nil;}
+    NSString *entrypoint=[@"Contents/MacOS/" stringByAppendingString:executable];
+    if(!NoLinks(Child(app,@"Contents/Resources/game/build-info.json"))||!NoLinks(Child(app,entrypoint))){Fail(error,@"The app contains linked launch metadata.");return nil;}
     NSDictionary *info=JSON(Child(app,@"Contents/Resources/game/build-info.json"));
     if (![info isKindOfClass:NSDictionary.class] || ![info[@"game"] isKindOfClass:NSDictionary.class] ||
-        ![info[@"game"][@"title_id"] isEqual:@"0100965017338000"] || ![info[@"host_sha256"] isKindOfClass:NSString.class]) {
-        Fail(error,@"This build supports the Jamboree native adapter. Choose its built MacNativeGames app; raw game archives cannot be launched here.");return nil;
+        !TitleID(info[@"game"][@"title_id"]) || ![info[@"host_sha256"] isKindOfClass:NSString.class]) {
+        Fail(error,@"Choose a built DM-host native app with build provenance. Other native engines need an adapter; raw game archives cannot be launched here.");return nil;
     }
-    NSURL *host=Child(app,@"Contents/Resources/game/dmhost");
+    BOOL legacy=[info[@"game"][@"title_id"] isEqual:@"0100965017338000"];
+    if(!legacy && (![info[@"native_play"] isKindOfClass:NSDictionary.class] || ![info[@"native_play"][@"adapter"] isEqual:@"dmhost-v2"] || ![info[@"native_play"][@"managed_state"] isEqual:@YES])) {Fail(error,@"This app needs a managed-state DM-host adapter before it can be launched safely.");return nil;}
+    NSString *hostPath=info[@"host_executable"]?:@"Contents/Resources/game/dmhost";
+    if(![@[@"Contents/Resources/game/dmhost",@"Contents/MacOS/GameHost"] containsObject:hostPath]){Fail(error,@"Unsupported native runtime location.");return nil;}
+    NSURL *host=Child(app,hostPath);
     if (!NoLinks(host) || ![NPSHA256(host) isEqual:info[@"host_sha256"]] || !Command(@"/usr/bin/codesign",@[@"--verify",@"--deep",@"--strict",app.path],nil,error)) {
         Fail(error,@"The app is incomplete or its signed host hash has changed.");return nil;
     }
@@ -201,29 +222,48 @@ static NSDictionary *Files(NSURL *root, NSError **error) {
     if (!Command(@"/usr/bin/codesign",@[@"-d",@"--verbose=4",app.path],&signing,error)) return nil;
     NSString *cdhash=@"";
     for (NSString *line in [signing componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) if ([line hasPrefix:@"CDHash="]) cdhash=[line substringFromIndex:7];
-    if (!cdhash.length || !Exists(Child(app,@"Contents/MacOS/Jamboree"))) { Fail(error,@"The native launcher is missing.");return nil; }
-    return @{@"id":@"0100965017338000",@"title":@"Super Mario Party Jamboree",@"path":app.path,
-             @"host_sha256":info[@"host_sha256"],@"bundle_cdhash":cdhash,@"version":info[@"game"][@"version"]?:@"unknown",
-             @"chain":info[@"chain"]?:@"unknown",@"language":info[@"language"]?:@"en-US"};
+    if (!cdhash.length || !Exists(Child(app,entrypoint))) { Fail(error,@"The native launcher is missing.");return nil; }
+    NSString *title=plist[@"CFBundleDisplayName"]?:plist[@"CFBundleName"]?:app.lastPathComponent.stringByDeletingPathExtension;
+    if(![title isKindOfClass:NSString.class]||!title.length)title=@"Native game";
+    NSString *version=info[@"game"][@"version"];
+    if(![version isKindOfClass:NSString.class])version=@"unknown";
+    return @{@"id":[info[@"game"][@"title_id"] lowercaseString],@"title":title,@"path":app.path,
+             @"host_sha256":info[@"host_sha256"],@"bundle_cdhash":cdhash,@"version":version,
+             @"chain":info[@"chain"]?:@"unknown",@"language":info[@"language"]?:@"en-US",@"executable":entrypoint,
+             @"executable_sha256":NPSHA256(Child(app,entrypoint)),@"host_executable":hostPath,@"adapter":@"dmhost",@"game_mode_supported":@([plist[@"LSSupportsGameMode"] boolValue]),
+             @"controllers":@([info[@"game"][@"title_id"] isEqual:@"0100965017338000"]||[info[@"controller_setup"] boolValue])};
 }
 - (NSDictionary *)importApp:(NSURL *)app error:(NSError **)error {
-    NSDictionary *game=[self validatedApp:app error:error]; if (!game) return nil;
-    if (!WriteJSON(@[game],Child(self.root,@"library.json"),error)) return nil;
-    return game;
+    return [self importApps:@[app] error:error].firstObject;
+}
+- (NSArray<NSDictionary *> *)importApps:(NSArray<NSURL *> *)apps error:(NSError **)error {
+    NSMutableArray *validated=[NSMutableArray new];
+    for(NSURL *app in apps){NSDictionary *game=[self validatedApp:app error:error];if(!game)return nil;[validated addObject:game];}
+    NSMutableArray *catalog=[self.games mutableCopy];
+    for(NSDictionary *game in validated){NSUInteger i=[catalog indexOfObjectPassingTest:^BOOL(NSDictionary *old,NSUInteger index,BOOL *stop){(void)index;(void)stop;return [old[@"path"] isEqual:game[@"path"]];}];if(i==NSNotFound)[catalog addObject:game];else catalog[i]=game;}
+    if(!WriteJSON(catalog,Child(self.root,@"library.json"),error))return nil;return validated;
+}
+- (BOOL)removeGame:(NSDictionary *)game error:(NSError **)error {
+    NSMutableArray *catalog=[self.games mutableCopy];[catalog filterUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSDictionary *item,NSDictionary *bindings){(void)bindings;return ![item[@"path"] isEqual:game[@"path"]];}]];
+    return WriteJSON(catalog,Child(self.root,@"library.json"),error);
 }
 - (BOOL)verifyGame:(NSDictionary *)game error:(NSError **)error {
     if (![game[@"path"] isKindOfClass:NSString.class]) return Fail(error,@"Choose an installed native app.");
     NSDictionary *actual=[self validatedApp:[NSURL fileURLWithPath:game[@"path"]] error:error]; if (!actual) return NO;
-    return [actual isEqual:game] || Fail(error,@"This app changed since it was added. Add the updated build again to review its identity.");
+    for(NSString *key in @[@"id",@"path",@"host_sha256",@"bundle_cdhash",@"executable",@"executable_sha256",@"host_executable"])
+        if(game[key]&&![game[key] isEqual:actual[key]])return Fail(error,@"This app changed since it was added. Add the updated build again to review its identity.");
+    return YES;
 }
 - (BOOL)gameIsRunning {
     NSString *processes=nil;
     if (!Command(@"/bin/ps",@[@"-axo",@"comm="],&processes,nil)) return YES;
+    NSMutableSet *executables=[NSMutableSet new];
+    for(NSDictionary *game in self.games){NSString *entry=game[@"executable"]?:@"Contents/MacOS/Jamboree";[executables addObject:[game[@"path"] stringByAppendingPathComponent:entry]];[executables addObject:[game[@"path"] stringByAppendingPathComponent:game[@"host_executable"]?:@"Contents/Resources/game/dmhost"]];}
     for (NSString *line in [processes componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet])
-        if ([line hasSuffix:@"/Contents/Resources/game/dmhost"] || [line hasSuffix:@"/Contents/MacOS/Jamboree"]) return YES;
+        if ([line hasSuffix:@"/Contents/Resources/game/dmhost"] || [line hasSuffix:@"/Contents/MacOS/GameHost"] || [line hasSuffix:@"/Contents/MacOS/Jamboree"] || [executables containsObject:[line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet]]) return YES;
     return NO;
 }
-- (NSURL *)backupRoot { return Child(self.root,@"Backups/0100965017338000"); }
+- (NSURL *)backupRoot { return Child(self.root,[@"Backups/" stringByAppendingString:self.activeID]); }
 - (NSDictionary *)validatedBackup:(NSURL *)url error:(NSError **)error {
     if (![RulePath(url.URLByDeletingLastPathComponent) isEqual:RulePath(self.backupRoot)] || ![[NSUUID alloc] initWithUUIDString:url.lastPathComponent] || !NoLinks(url)) {
         Fail(error,@"Backup path is outside the local snapshot store.");return nil;
@@ -231,7 +271,7 @@ static NSDictionary *Files(NSURL *root, NSError **error) {
     if(!NoLinks(Child(url,@"manifest.json"))){Fail(error,@"Backup metadata is a symbolic link.");return nil;}
     NSDictionary *manifest=JSON(Child(url,@"manifest.json"));
     if (![manifest isKindOfClass:NSDictionary.class] || ![manifest[@"schema"] isEqual:@1] ||
-        ![manifest[@"game"] isEqual:@"0100965017338000"] || ![manifest[@"files"] isKindOfClass:NSDictionary.class] ||
+        ![manifest[@"game"] isEqual:self.activeID] || ![manifest[@"files"] isKindOfClass:NSDictionary.class] ||
         ![manifest[@"created"] isKindOfClass:NSNumber.class] || ![manifest[@"label"] isKindOfClass:NSString.class]) {
         Fail(error,@"Backup metadata is invalid.");return nil;
     }
@@ -264,7 +304,7 @@ static NSDictionary *Files(NSURL *root, NSError **error) {
         BOOL isDirectory=NO;[FM() fileExistsAtPath:url.path isDirectory:&isDirectory];
         if(![FM() setAttributes:@{NSFilePosixPermissions:isDirectory?@0700:@0600} ofItemAtPath:url.path error:error])return nil;
     }
-    NSDictionary *manifest=@{@"schema":@1,@"game":@"0100965017338000",@"label":label,@"created":@(NSDate.date.timeIntervalSince1970),@"files":files};
+    NSDictionary *manifest=@{@"schema":@1,@"game":self.activeID,@"label":label,@"created":@(NSDate.date.timeIntervalSince1970),@"files":files};
     if(!WriteJSON(manifest,Child(pending,@"manifest.json"),error)||![self move:pending to:complete error:error])return nil;
     NSArray *snapshots=self.backups;
     // Delete only completed, hash-validated snapshots owned by this adapter.
@@ -307,12 +347,13 @@ static NSDictionary *Files(NSURL *root, NSError **error) {
     return success;
 }
 - (NSDictionary *)options {
-    if(!NoLinks(Child(self.root,@"options.json")))return @{@"hud":@NO,@"record":@NO};
-    NSDictionary *value=JSON(Child(self.root,@"options.json"));
-    if(![value isKindOfClass:NSDictionary.class])return @{@"hud":@NO,@"record":@NO};
-    return @{@"hud":@([value[@"hud"] isEqual:@YES]),@"record":@([value[@"record"] isEqual:@YES])};
+    NSURL *path=Child(self.root,[@"LaunchOptions/" stringByAppendingFormat:@"%@.json",[self keyForGame:self.activeGame?:@{}]]);
+    NSDictionary *value=NoLinks(path)?JSON(path):nil;
+    if(![value isKindOfClass:NSDictionary.class]&&[self.activeID isEqual:@"0100965017338000"]&&NoLinks(Child(self.root,@"options.json")))value=JSON(Child(self.root,@"options.json"));
+    if(![value isKindOfClass:NSDictionary.class])value=@{};
+    return @{@"hud":@([value[@"hud"] isEqual:@YES]),@"record":@([value[@"record"] isEqual:@YES]),@"fullscreen":@([value[@"fullscreen"] isKindOfClass:NSNumber.class]?[value[@"fullscreen"] boolValue]:YES)};
 }
-- (void)setOptions:(NSDictionary *)options { WriteJSON(options,Child(self.root,@"options.json"),nil); }
+- (void)setOptions:(NSDictionary *)options {NSURL *directory=Child(self.root,@"LaunchOptions");if(NoLinks(directory)&&Directory(directory,nil))WriteJSON(options,Child(directory,[[self keyForGame:self.activeGame?:@{}] stringByAppendingString:@".json"]),nil);}
 - (NSString *)sandboxForSession:(NSURL *)session {
     NSMutableString *profile=[NSMutableString stringWithString:@"(version 1)\n(allow default)\n(deny network*)\n(deny file-write* (require-all\n"];
     for(NSURL *url in @[self.state,session]) [profile appendFormat:@" (require-not (subpath %@))\n",NPQuote(RulePath(url))];
@@ -324,11 +365,19 @@ static NSDictionary *Files(NSURL *root, NSError **error) {
 - (NSDictionary<NSString *,NSString *> *)environmentForSession:(NSURL *)session controllers:(BOOL)controllers {
     NSMutableDictionary *environment=[NSMutableDictionary dictionaryWithDictionary:@{@"HOME":self.home.path,@"PATH":@"/usr/bin:/bin:/usr/sbin:/sbin",@"LANG":@"en_US.UTF-8",@"TMPDIR":[Child(session,@"tmp").path stringByAppendingString:@"/"],@"CLANG_MODULE_CACHE_PATH":Child(self.state,@"native-play-clang-cache").path,@"DM_SCREEN_MATCH":@"0",@"DM_BOOTPROF":@"0",@"DM_NVN_FRAMES":@"0"}];
     if(controllers)environment[@"DM_CONTROLLER_SETUP"]=@"1";
+    environment[@"DM_FULLSCREEN"]=[self.options[@"fullscreen"] boolValue]?@"1":@"0";
+    environment[@"DM_STATE_DIR"]=self.state.path;
+    environment[@"DM_SAVE"]=Child(self.state,@"save").path;
+    environment[@"DM_TEMP"]=Child(self.state,@"temp").path;
     if([self.options[@"hud"] boolValue])environment[@"MTL_HUD_ENABLED"]=@"1";
     if([self.options[@"record"] boolValue]){environment[@"DM_NVN_TSV"]=Child(session,@"frames.tsv").path;environment[@"DM_NVN_TSV_CALLS"]=@"0";}
     return environment;
 }
 - (NSTask *)launch:(NSDictionary *)game controllers:(BOOL)controllers completion:(void (^)(int,NSURL *))completion error:(NSError **)error {
+    NPStore *scoped=[[[self class] alloc]initWithRoot:self.root home:self.home];scoped.activeGame=game;
+    return [scoped launchScoped:game controllers:controllers completion:completion error:error];
+}
+- (NSTask *)launchScoped:(NSDictionary *)game controllers:(BOOL)controllers completion:(void (^)(int,NSURL *))completion error:(NSError **)error {
     if([self gameIsRunning]){Fail(error,@"The game is already running. Return to it and press F2 for controllers.");return nil;}
     if(![self verifyGame:game error:error]||![self backup:@"Before play" error:error])return nil;
     if([self gameIsRunning]){Fail(error,@"Another game session started. Close it before launching again.");return nil;}
@@ -341,15 +390,17 @@ static NSDictionary *Files(NSURL *root, NSError **error) {
     // or making an outbound connection (only a denied loopback socket attempt).
     if(!Command(@"/usr/bin/sandbox-exec",@[@"-f",profile.path,NSBundle.mainBundle.executablePath,@"--sandbox-probe",Child(self.root,@"probe-denied").path,Child(session,@"probe-allowed").path,Child(self.home,@".native-play-denied-write").path],nil,error))return nil;
     NSTask *task=[NSTask new];task.executableURL=[NSURL fileURLWithPath:@"/usr/bin/sandbox-exec"];
-    task.arguments=@[@"-f",profile.path,[game[@"path"] stringByAppendingPathComponent:@"Contents/MacOS/Jamboree"]];
+    NSDictionary *launchInfo=[NSDictionary dictionaryWithContentsOfURL:Child([NSURL fileURLWithPath:game[@"path"]],@"Contents/Info.plist")];
+    NSString *entry=game[@"executable"]?:[@"Contents/MacOS/" stringByAppendingString:launchInfo[@"CFBundleExecutable"]];
+    task.arguments=@[@"-f",profile.path,[game[@"path"] stringByAppendingPathComponent:entry]];
     task.environment=[self environmentForSession:session controllers:controllers];task.currentDirectoryURL=self.state;
     BOOL recording=task.environment[@"DM_NVN_TSV"]!=nil,hud=task.environment[@"MTL_HUD_ENABLED"]!=nil;
     [FM() createFileAtPath:Child(session,@"launcher.log").path contents:nil attributes:@{NSFilePosixPermissions:@0600}];
     NSFileHandle *log=[NSFileHandle fileHandleForWritingAtPath:Child(session,@"launcher.log").path];task.standardOutput=log;task.standardError=log;
     task.terminationHandler=^(NSTask *finished){[log closeFile];NPProfileSummary(session);WriteJSON(@{@"status":@(finished.terminationStatus),@"finished":@(NSDate.date.timeIntervalSince1970)},Child(session,@"result.json"),nil);NPPruneSessions(self.root);completion(finished.terminationStatus,session);};
     if(![task launchAndReturnError:error])return nil;
-    WriteJSON(@{@"game":game[@"id"],@"started":@(NSDate.date.timeIntervalSince1970),@"network_denied":@YES,@"hud":@(hud),@"record":@(recording)},Child(session,@"session.json"),nil);
-    if(recording)[self setOptions:@{@"hud":@(hud),@"record":@NO}];
+    WriteJSON(@{@"game":game[@"id"],@"app_key":[self keyForGame:game],@"started":@(NSDate.date.timeIntervalSince1970),@"network_denied":@YES,@"hud":@(hud),@"record":@(recording)},Child(session,@"session.json"),nil);
+    if(recording){NSMutableDictionary *options=[self.options mutableCopy];options[@"record"]=@NO;[self setOptions:options];}
     return task;
 }
 @end

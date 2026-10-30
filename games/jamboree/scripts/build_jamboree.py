@@ -140,21 +140,24 @@ def package(source, build, output, language):
             shutil.copytree(src, resources / name)
         (resources / 'shader-cache').mkdir()
         shutil.copytree(libraries, resources / 'shader-cache' / libraries.name)
-        shutil.copy2(build / 'tools/dmhost', resources / 'dmhost')
+        shutil.copy2(build / 'tools/dmhost', macos / 'GameHost')
         (resources / 'language.txt').write_text(language + '\n')
         with (partial / 'Contents/Info.plist').open('wb') as stream:
             plistlib.dump({'CFBundleExecutable': 'Jamboree', 'CFBundleIdentifier': 'org.macnativegames.jamboree',
                           'CFBundleName': APP_NAME, 'CFBundleDisplayName': APP_NAME,
                           'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': '2.3.0',
                           'CFBundleVersion': '458752', 'LSMinimumSystemVersion': '26.0',
-                          'NSHighResolutionCapable': True, 'LSApplicationCategoryType': 'public.app-category.games'}, stream)
+                          'NSHighResolutionCapable': True, 'LSApplicationCategoryType': 'public.app-category.games',
+                          'LSSupportsGameMode': True, 'GCSupportsGameMode': True}, stream)
         subprocess.run(['clang', '-arch', 'arm64', '-mmacosx-version-min=26.0', '-O2', '-Wall', '-Wextra', '-Werror', str(GAME / 'app/launcher.c'),
                         '-o', str(macos / 'Jamboree')], check=True)
         # Sign the nested executable before recording its final content hash.
-        subprocess.run(['codesign', '--force', '--sign', '-', str(resources / 'dmhost')], check=True)
+        subprocess.run(['codesign', '--force', '--sign', '-', str(macos / 'GameHost')], check=True)
         # Preserve the rewriter's rule hashes; add portable build provenance for reviewers.
         report = {'game': pins, 'chain': chain, 'shader_inputs': inputs, 'language': language,
-                  'host_sha256': hashlib.sha256((resources / 'dmhost').read_bytes()).hexdigest(),
+                  'host_sha256': hashlib.sha256((macos / 'GameHost').read_bytes()).hexdigest(),
+                  'host_executable': 'Contents/MacOS/GameHost',
+                  'native_play': {'adapter': 'dmhost-v2', 'managed_state': True}, 'controller_setup': True,
                   'rewrite_rules': (build / 'patched_v458752/build_src.sha256').read_text()}
         (resources / 'build-info.json').write_text(json.dumps(report, indent=2) + '\n')
         # Sign nested Mach-O files explicitly, then the bundle, without touching game data.
