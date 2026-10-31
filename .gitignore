@@ -13,6 +13,7 @@ __pycache__/
 *.bfttf
 *.sav
 # build output (the work folder normally lives next to the card image)
+/out/
 TOTK_build/
 BotW_build/
 *.app/

@@ -1,0 +1,4 @@
+{
+  "compiler": "clang",
+  "cppstd": 23
+}

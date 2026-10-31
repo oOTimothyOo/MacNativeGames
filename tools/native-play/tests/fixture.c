@@ -20,7 +20,7 @@ int main(void) {
     if(snprintf(path,sizeof path,"%sallowed",temporary)>=(int)sizeof path)return 5;
     file=fopen(path,"wb");if(!file)return 6;fputs("synthetic",file);fclose(file);
     int fd=socket(AF_INET,SOCK_STREAM,0);if(fd<0)return (errno==EPERM||errno==EACCES)?0:7;
-    struct sockaddr_in address={.sin_len=sizeof address,.sin_family=AF_INET,.sin_port=htons(9),.sin_addr={htonl(INADDR_LOOPBACK)}};
+    struct sockaddr_in address={.sin_len=sizeof address,.sin_family=AF_INET,.sin_port=htons(9),.sin_addr={htonl(INADDR_LOOPBACK)},.sin_zero={0}};
     int result=connect(fd,(struct sockaddr *)&address,sizeof address),failure=errno;close(fd);
     return result<0&&(failure==EPERM||failure==EACCES)?0:8;
 }

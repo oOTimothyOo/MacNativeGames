@@ -2,9 +2,9 @@ name: Native Play and Jamboree
 
 on:
   push:
-    paths: ['tools/native-play/**', 'games/jamboree/**', '.github/workflows/native-play.yml']
+    paths: ['CMakeLists.txt', 'tools/native-play/**', 'games/jamboree/**', '.github/workflows/native-play.yml']
   pull_request:
-    paths: ['tools/native-play/**', 'games/jamboree/**', '.github/workflows/native-play.yml']
+    paths: ['CMakeLists.txt', 'tools/native-play/**', 'games/jamboree/**', '.github/workflows/native-play.yml']
   workflow_dispatch:
 
 permissions:
@@ -18,6 +18,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7, same pin as source CI
         with:
           persist-credentials: false
+      - name: Compile the native tools and test programs
+        run: |
+          cmake -S . -B "$RUNNER_TEMP/native-tools" -DCMAKE_BUILD_TYPE=Release -DCMAKE_RUNTIME_OUTPUT_DIRECTORY="$PWD/out/macos-arm64/Release"
+          cmake --build "$RUNNER_TEMP/native-tools" --parallel
       - name: Build the content-free native launcher
         run: python3 tools/native-play/build.py --output "$RUNNER_TEMP/Native Play.app" --work-dir "$RUNNER_TEMP/native-play-icon"
       - name: Check recovery, policy and native controls with synthetic state

@@ -17,6 +17,15 @@ static void make_dir(const char *path) {
     exit(1);
 }
 
+// macOS's Game Mode daemon identifies a newly launched app a few milliseconds in.
+// An exec landing during that window reads as "Game exited" and it never looks at
+// this process again, so Game Mode stays off for the whole session (checked with
+// `log show --predicate 'subsystem == "com.apple.gamepolicyd"'`). The delay is
+// imperceptible next to the game's boot time; missing the window costs only Game Mode.
+static void wait_for_game_mode_identification(void) {
+    usleep(250 * 1000);
+}
+
 static void join(char *out, size_t n, const char *base, const char *name) {
     if (snprintf(out, n, "%s/%s", base, name) >= (int)n) {
         fprintf(stderr, "path too long: %s/%s\n", base, name);
@@ -85,6 +94,7 @@ int main(void) {
     join(host, sizeof host, app, "MacOS/GameHost");
     join(patched, sizeof patched, game, "patched");
     if (chdir(run)) { perror("chdir"); return 1; }
+    wait_for_game_mode_identification();
     const char *policy = getenv("DM_NATIVE_PLAY_POLICY");
     if (policy) {
         struct stat policy_info;

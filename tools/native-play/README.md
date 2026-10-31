@@ -6,24 +6,33 @@ The library supports multiple validated native apps. **Super Mario Party Jambore
 
 ## Build and launch
 
-Requires Apple Silicon, macOS 26+ and the Xcode Command Line Tools. No additional packages or administrator privileges are needed for this launcher.
+Requires Apple Silicon, macOS 26+ and the Xcode Command Line Tools. Compile the executables from the repository root with any CMake and Clang, or in a [cppbuild](https://github.com/oOTimothyOo/cpp23-dev-image) container, which puts them in the default location `build.py` and `test.py` use:
 
 ```sh
+bash ~/git/cpp23-dev-image/scripts/cppbuild.sh Release macos-arm64
+# or: cmake -S . -B /private/path/tools -DCMAKE_BUILD_TYPE=Release \
+#       -DCMAKE_RUNTIME_OUTPUT_DIRECTORY="$PWD/out/macos-arm64/Release" && cmake --build /private/path/tools --parallel
 python3 tools/native-play/build.py \
   --output "$HOME/Applications/Native Play.app" \
   --work-dir /private/path/native-play-build
 ```
 
-Choose a **new** output path; the builder refuses an existing app or partial bundle. Open Native Play from Finder or add it to the Dock, then choose **Add native apps…** and select one or more compatible built `.app` bundles. Apps are registered by location without copying their content. Keep each game app installed after adding it. A batch is checked in full before the catalog changes; re-adding an updated path refreshes only that entry.
+Choose a **new** output path; the builder refuses an existing app or partial bundle. Open Native Play from Spotlight or Finder, or keep it in the Dock, then press **+** and select one or more compatible built `.app` bundles. Apps are registered by location without copying their content, so keep each game app installed after adding it. A batch is checked in full before the catalog changes; re-adding an updated path refreshes only that entry.
 
 The library has four native pages:
 
-- **Library:** a responsive searchable grid, selection, Play, Reveal and non-destructive removal from the library.
-- **Backups:** a game selector, padded snapshot rows, manual snapshots and restore controls; automatic snapshot before every launch.
+- **Library:** the selected game's artwork with Play, and a **…** menu for controller setup, Finder, artwork and removal from the library. A searchable shelf of tiles appears from the second game on. Double-click a tile to play.
+- **Backups:** snapshots of the selected game, manual backup and restore; an automatic snapshot comes before every launch.
 - **Performance:** independent fullscreen, Metal HUD and one-session timing preferences for each installed app.
-- **Controllers:** a game selector and access to a declared live controller setup, player assignment and button swaps. In Jamboree, use F2 or Command-Shift-C while playing.
+- **Controllers:** access to a declared live controller setup, player assignment and button swaps. In Jamboree, use F2 or Command-Shift-C while playing.
 
-The artwork and icon are simple authored shapes. Game artwork, archives, keys, game code, assets and shaders are not included in the launcher or source changes.
+Long-running work (hashing, backup, restore, launch preparation) runs one job at a time on a background queue, so the window always stays responsive.
+
+## Artwork
+
+Artwork comes from the player's own files. Native Play samples frames from the largest `.mp4` in an installed game's `RomFS`, keeps the most colorful evenly lit one, and caches it privately in `Native Play/Artwork/`. **Choose Artwork…** replaces it with any picture, and **Use Game's Artwork** goes back. A game without a movie shows a plain gradient beside its title.
+
+Nothing is downloaded, and no game artwork, archives, keys, game code, assets or shaders are included in the launcher or this repository. The app icon is made of simple authored shapes.
 
 ## Privacy and recovery
 
@@ -55,9 +64,17 @@ The primary executable comes from `Info.plist`'s `CFBundleExecutable`. It must h
 
 ## macOS Game Mode
 
-New Jamboree packages declare Apple's `LSSupportsGameMode` flag and keep the actual runtime in `Contents/MacOS/GameHost`. Native Play opens this compatible package through Launch Services, and its C entry point applies the restriction profile before starting the runtime. Both the PID and macOS app association are retained across the handoff. A direct sandboxed process launch can leave the Launch Services bundle identifier unset even when Foundation finds the bundle. Game resources remain in `Contents/Resources/game/`; moving the unchanged runtime requires no shader rebuild.
+New Jamboree packages declare Apple's `LSSupportsGameMode` flag and keep the actual runtime in `Contents/MacOS/GameHost`. Native Play opens this compatible package through Launch Services, and its C entry point applies the restriction profile before starting the runtime, keeping the PID and macOS app association. Game resources remain in `Contents/Resources/game/`.
 
-Start the game in native macOS full screen, then use Command-Esc to open the Game Overlay on macOS 26 and check Game Mode. macOS controls activation and remembers a per-game disabled preference; a bundle flag alone does not establish that Game Mode is active. See [Apple's Game Mode instructions](https://support.apple.com/en-euro/105118) and [the bundle flag documentation](https://developer.apple.com/documentation/bundleresources/information-property-list/lssupportsgamemode). The library itself is a utility and does not request Game Mode.
+**A launcher must not `exec` during the first moments after launch.** macOS's `gamepolicyd` identifies a new app a few milliseconds in. An `exec` landing in that window is logged as "Game exited via exit event" while the process keeps running, and the daemon never evaluates it again, so Game Mode stays off for the whole session. Bundle identifiers, categories and the restriction profile are not the cause: a bundle with correct metadata hits this race. Jamboree's launcher therefore waits 250 ms before its `exec`, about ten times the measured window. Because this affects only the launcher, the game's runtime and shaders do not change.
+
+To see macOS's decision directly, instead of reading the HUD:
+
+```sh
+/usr/bin/log show --last 5m --info --style compact --predicate 'subsystem == "com.apple.gamepolicyd"'
+```
+
+A healthy launch shows `Found game`, `Full screen gaming session is now active`, then `Game mode status is now on`. The game must be in native macOS full screen, and macOS remembers a per-game disabled preference. See [Apple's Game Mode instructions](https://support.apple.com/en-euro/105118) and [the bundle flag documentation](https://developer.apple.com/documentation/bundleresources/information-property-list/lssupportsgamemode). The library itself is a utility and does not request Game Mode.
 
 Launch Services reports when its app terminates but does not provide this launcher with the game's exit status. Those session records use `status: -1` and `exit_status_known: false`; they must not be interpreted as either a confirmed clean exit or a crash. Direct child launches still record their actual exit status. Process-exit notifications finish recordings without background polling or an additional persistent helper.
 
@@ -79,6 +96,10 @@ python3 tools/native-play/test.py \
   --app "$HOME/Applications/Native Play.app"
 ```
 
-Tests cover multi-app import and independent identity checks, isolated progress/preferences, cross-game restore rejection, non-destructive removal, save/prefs round trips, corruption, links/traversal, mid-restore failure/rollback, retention, running-game guards, unsigned bundles, safe launch defaults, numeric timing calculations, and native hit areas. Signed synthetic apps exercise both runtime layouts under the real sandbox. A third fixture exercises Launch Services, the actual Jamboree C entry point and the restriction tool together; it verifies its running bundle identity and writes a success receipt only after the file/network restrictions pass. UI checks render three synthetic catalog entries at three window sizes; no gameplay is captured. Jamboree's packaging suite additionally checks managed state, language and rejection of a public policy file after the real C launcher hands off.
+Tests cover multi-app import and independent identity checks, isolated progress/preferences, cross-game restore rejection, non-destructive removal, save/prefs round trips, corruption, malformed catalog values, links/traversal, mid-restore failure/rollback, retention, running-game guards, unsigned bundles, a file added after signing, safe launch defaults and numeric timing calculations. Signed synthetic apps exercise both runtime layouts under the real sandbox. A third fixture exercises Launch Services, the actual Jamboree C entry point and the restriction tool together; it verifies its running bundle identity and writes a success receipt only after the file/network restrictions pass. An end-to-end check adds a signed synthetic game and plays it through the app's own Add and Play code. UI checks drive the real window at three sizes with zero, one and three synthetic games, including the sidebar, search, per-game preferences, artwork, menus and background work; no gameplay is captured.
+
+`--game-mode RUNS` also launches a synthetic full-screen Metal game through the real launcher chain that many times and fails unless macOS's own log reports Game Mode on for every run. It takes over the screen for a few seconds per run, so it is opt-in and not part of CI. Removing the launcher's wait makes this check fail.
+
+Jamboree's packaging suite additionally checks managed state, language and rejection of a public policy file after the real C launcher hands off.
 
 The native game fixes and upstream attribution are recorded in [Jamboree's improvement notes](../../games/jamboree/docs/macos-improvements.md). Game builds, Metal compatibility and two-controller gameplay still require local hardware acceptance.
